@@ -1,0 +1,62 @@
+# ---- Secrets & credentials (NEVER commit) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+*.p12
+*-service-account*.json
+service-account*.json
+serviceAccount*.json
+google-services.json
+GoogleService-Info.plist
+secrets/
+**/secrets/
+*.keystore
+*.jks
+
+# ---- Node / pnpm / turbo ----
+node_modules/
+.pnpm-store/
+.turbo/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Expo / React Native ----
+.expo/
+.expo-shared/
+*.ipa
+*.apk
+*.aab
+ios/Pods/
+ios/build/
+android/.gradle/
+android/app/build/
+
+# ---- Firebase / GCP ----
+.firebase/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+.dataconnect/
+
+# ---- Terraform / infra ----
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+!*.tfvars.example
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
