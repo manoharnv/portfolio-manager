@@ -42,11 +42,12 @@ import type {
   Quote,
   SessionStatus,
 } from '@pm/core';
-import type { Config, LedgerEntry, OrderRecord, ProposalStatus } from '@pm/core';
+import type { Config, OrderRecord, ProposalStatus } from '@pm/core';
 import type { BackendEnvironment } from '../config.js';
 import type { Logger } from '../logger.js';
 import { sessionRefusal } from '../session-status.js';
 import { SessionUnavailableError } from '../ports/index.js';
+import { isClosingOrder, reservationInr } from './reservations.js';
 import type {
   BookRepo,
   BrokerContext,
@@ -147,16 +148,6 @@ function isSuccessShape(value: unknown): value is ExecutionSuccess {
   return (
     v['ok'] === true && typeof v['orderId'] === 'string' && typeof v['brokerOrderId'] === 'string'
   );
-}
-
-/**
- * Is this order *reducing* a position the book already holds? A SELL closes a
- * long, a BUY closes a short — and a DELIVERY SELL is always treated as a close,
- * because you cannot short delivery stock (docs/10 §10.4 exit rule).
- */
-export function isClosingOrder(order: NormalizedOrder, owned: number): boolean {
-  if (order.side === 'SELL') return owned > 0 || order.product === 'DELIVERY';
-  return owned < 0;
 }
 
 export function createExecutionService(deps: ExecutionDeps): ExecutionService {
@@ -413,7 +404,11 @@ async function execute(deps: ExecutionDeps, input: ExecuteProposalInput): Promis
   }
 
   // --- book budget (§10.3) + ledger canExit (§10.4) -----------------------
+  // `notional` is the conservative valuation the guardrails used (it may use the
+  // live LTP); `reserved` is what the sleeve actually commits until the order
+  // fills or dies. They differ only for MARKET/SL-M orders.
   const notional = estimateOrderNotionalInr(order, ltp) ?? 0;
+  const reserved = reservationInr(order, proposal.marketContext.ltpAtProposal) ?? 0;
   const book = await deps.books.get(uid, proposal.bookId);
   if (book === undefined) {
     return blockAndRefuse(
@@ -424,6 +419,8 @@ async function execute(deps: ExecutionDeps, input: ExecuteProposalInput): Promis
     );
   }
 
+  // The ledger holds FILLED quantity only, so `canExit` can never be satisfied
+  // by an order that is merely in flight.
   const entries = await deps.ledger.list(uid);
   const key = symbolKey(order.symbol);
   const owned = ownedQty(entries, proposal.bookId, key, order.product);
@@ -439,12 +436,12 @@ async function execute(deps: ExecutionDeps, input: ExecuteProposalInput): Promis
         exit.reason,
       );
     }
-  } else if (!canDeploy(book, notional)) {
+  } else if (!canDeploy(book, reserved)) {
     return blockAndRefuse(
       deps,
       { uid, proposalId, idempotencyKey, refuse },
       'BUDGET_EXCEEDED',
-      `book '${book.id}' cannot deploy ₹${notional} ` +
+      `book '${book.id}' cannot reserve ₹${reserved} ` +
         `(allocated ₹${book.allocatedCapitalInr}, deployed ₹${book.deployedInr})`,
     );
   }
@@ -482,7 +479,7 @@ async function execute(deps: ExecutionDeps, input: ExecuteProposalInput): Promis
     });
   }
 
-  // --- N. persist the order, ledger and book ------------------------------
+  // --- N. persist the order and reserve the book's capital -----------------
   const nowIso = now.toISOString();
   const record: OrderRecord = {
     id: orderId,
@@ -508,25 +505,13 @@ async function execute(deps: ExecutionDeps, input: ExecuteProposalInput): Promis
   };
   await deps.orders.create(record);
 
-  // Provisional attribution: the sleeve's capital is committed the moment the
-  // order leaves, and `reconcile` corrects this row (same id) from the fill.
-  const entry: LedgerEntry = {
-    id: deps.ids.ledgerId(orderId),
-    uid,
-    bookId: proposal.bookId,
-    strategyId: proposal.strategyId,
-    symbolKey: key,
-    product: order.product,
-    side: order.side,
-    qty: order.quantity,
-    price: order.limitPrice ?? ltp,
-    orderId,
-    ts: nowIso,
-  };
-  await deps.ledger.append(entry);
-
+  // NO ledger row here. The ledger records what the book *owns*, and nothing is
+  // owned until something fills — `reconcile` writes the row from the fill.
+  // What a submitted order does take is a *reservation* against the sleeve, so
+  // two proposals cannot spend the same rupees while both are in flight. An
+  // exit reserves nothing: the position it unwinds is already counted at cost.
   if (!closing) {
-    const deployed = applyDeployment(book, notional);
+    const deployed = applyDeployment(book, reserved);
     await deps.books.patch(uid, book.id, { deployedInr: deployed.deployedInr });
   }
 
@@ -550,6 +535,7 @@ async function execute(deps: ExecutionDeps, input: ExecuteProposalInput): Promis
       bookId: proposal.bookId,
       horizon: proposal.horizon,
       notionalInr: notional,
+      reservedInr: closing ? 0 : reserved,
       environment: deps.environment,
       ipUsed: deps.staticIp,
     },

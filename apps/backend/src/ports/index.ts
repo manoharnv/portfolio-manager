@@ -84,7 +84,8 @@ export interface ProposalRepo {
     to: ProposalStatus,
     patch?: ProposalTransitionPatch,
   ): Promise<ProposalTransitionResult>;
-  listPending(uid: string): Promise<Proposal[]>;
+  /** Proposals of this user currently in any of `statuses`. */
+  listByStatus(uid: string, statuses: readonly ProposalStatus[]): Promise<Proposal[]>;
 }
 
 export interface OrderRepo {
@@ -93,6 +94,11 @@ export interface OrderRepo {
   patch(id: string, patch: Partial<OrderRecord>): Promise<void>;
   /** Orders that may still change state — the reconciler's work list. */
   listOpen(uid: string): Promise<OrderRecord[]>;
+  /**
+   * The order a proposal produced, if any. The stuck-proposal sweep uses it to
+   * tell "never reached the broker" from "placed but the write was lost".
+   */
+  findByProposal(uid: string, proposalId: string): Promise<OrderRecord | undefined>;
   /** Every order approved within `[fromIso, toIso)`, for daily aggregates. */
   listApprovedBetween(uid: string, fromIso: string, toIso: string): Promise<OrderRecord[]>;
 }

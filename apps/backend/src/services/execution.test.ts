@@ -5,12 +5,12 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
-import { BrokerError, symbolKey } from '@pm/core';
+import { BrokerError } from '@pm/core';
 import type { Config, Proposal } from '@pm/core';
 import { silentLogger } from '../logger.js';
 import { SessionUnavailableError } from '../ports/index.js';
 import { createAuditWriter } from './audit.js';
-import { createExecutionService, isClosingOrder, stalenessRefusal } from './execution.js';
+import { createExecutionService, stalenessRefusal } from './execution.js';
 import type { ExecuteProposalInput, ExecutionService } from './execution.js';
 import {
   FakeAuditLog,
@@ -30,7 +30,6 @@ import {
 import {
   MARKET_CLOSED_NOW,
   MARKET_OPEN_NOW,
-  RELIANCE,
   makeBook,
   makeBrokerSession,
   makeConfig,
@@ -508,12 +507,61 @@ describe('book budget and ledger ownership', () => {
     expect(h.books.docs.get('u1:long_term')?.deployedInr).toBe(29_000);
   });
 
-  it('classifies closing orders correctly', () => {
-    expect(isClosingOrder(makeOrder({ side: 'SELL' }), 0)).toBe(true);
-    expect(isClosingOrder(makeOrder({ side: 'SELL', product: 'INTRADAY' }), 0)).toBe(false);
-    expect(isClosingOrder(makeOrder({ side: 'SELL', product: 'INTRADAY' }), 5)).toBe(true);
-    expect(isClosingOrder(makeOrder({ side: 'BUY' }), 0)).toBe(false);
-    expect(isClosingOrder(makeOrder({ side: 'BUY' }), -5)).toBe(true);
+  /**
+   * The bug this model exists to prevent: a submitted-but-unfilled BUY must not
+   * make the book look like it owns anything. Otherwise a day-trade book's EOD
+   * square-off would "close" shares that never arrived and open a real short.
+   */
+  it('does not let an unfilled BUY satisfy a later SELL', async () => {
+    const buy = await h.run();
+    expect(buy).toMatchObject({ ok: true });
+    // The order is SUBMITTED, nothing has filled, so the ledger is still empty.
+    expect(await h.ledger.list('u1')).toHaveLength(0);
+
+    h.proposals.put(
+      makeProposal({
+        id: 'p2',
+        order: makeOrder({ side: 'SELL', quantity: 10, limitPrice: 2950.5 }),
+      }),
+    );
+    const sell = await h.run({ proposalId: 'p2', idempotencyKey: 'idem-00000002' });
+
+    expect(sell).toMatchObject({ ok: false, reason: 'OWNERSHIP' });
+    expect(h.proposals.statusOf('p2')).toBe('blocked');
+    // Exactly one order ever reached the broker: the BUY.
+    expect(h.adapter.placeOrderCalls).toHaveLength(1);
+    expect(h.adapter.placeOrderCalls[0]?.order.side).toBe('BUY');
+  });
+
+  it('still holds the sleeve’s capital while the BUY is unfilled', async () => {
+    await h.run();
+    expect(h.books.docs.get('u1:long_term')?.deployedInr).toBeCloseTo(29_505, 6);
+  });
+
+  it('reserves a MARKET order at the proposal-time LTP', async () => {
+    h.proposals.put(
+      makeProposal({
+        order: makeOrder({ orderType: 'MARKET', limitPrice: undefined }),
+        marketContext: { ltpAtProposal: 2_951 },
+      }),
+    );
+    const result = await h.run();
+
+    expect(result).toMatchObject({ ok: true });
+    expect(h.books.docs.get('u1:long_term')?.deployedInr).toBeCloseTo(29_510, 6);
+  });
+
+  it('checks the budget against the reservation, not the live quote', async () => {
+    // Budget leaves room for the ordered value (₹29,505) but not much more.
+    h.books.docs.set('u1:long_term', makeBook({ allocatedCapitalInr: 29_600 }));
+    expect(await h.run()).toMatchObject({ ok: true });
+
+    h.books.docs.set('u1:long_term', makeBook({ allocatedCapitalInr: 29_000 }));
+    h.proposals.put(makeProposal({ id: 'p2' }));
+    expect(await h.run({ proposalId: 'p2', idempotencyKey: 'idem-00000002' })).toMatchObject({
+      ok: false,
+      reason: 'BUDGET_EXCEEDED',
+    });
   });
 });
 
@@ -646,7 +694,7 @@ describe('concurrent state changes', () => {
 // ---------------------------------------------------------------------------
 
 describe('success path (flowchart N)', () => {
-  it('writes the order, ledger, book, audit and proposal state', async () => {
+  it('writes the order, reservation, audit and proposal state — but no ledger row', async () => {
     const result = await h.run();
     expect(result).toEqual({
       ok: true,
@@ -672,19 +720,11 @@ describe('success path (flowchart N)', () => {
     });
     expect(order?.brokerRawAck).toBeDefined();
 
-    const entries = await h.ledger.list('u1');
-    expect(entries).toHaveLength(1);
-    expect(entries[0]).toMatchObject({
-      id: 'led_ord_0001',
-      bookId: 'long_term',
-      symbolKey: symbolKey(RELIANCE),
-      side: 'BUY',
-      qty: 10,
-      price: 2950.5,
-      orderId: 'ord_0001',
-    });
-
+    // Nothing is owned until something fills — reconciliation writes the row.
+    expect(await h.ledger.list('u1')).toHaveLength(0);
+    // The sleeve's capital is reserved in the meantime.
     expect(h.books.docs.get('u1:long_term')?.deployedInr).toBeCloseTo(29_505, 6);
+    expect(h.auditLog.byType('order.submitted')[0]?.detail['reservedInr']).toBeCloseTo(29_505, 6);
     expect(h.proposals.statusOf('p1')).toBe('placed');
     expect(h.proposals.docs.get('p1')?.orderId).toBe('ord_0001');
     expect(h.idempotency.docs.get('idem-00000001')).toMatchObject({

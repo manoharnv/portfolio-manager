@@ -109,7 +109,7 @@ function servicesFrom(s: Stubs): Services {
     },
     portfolio: { refresh: () => Promise.resolve(s.portfolio) },
     reconcile: {
-      reconcileUser: () => Promise.resolve({ checked: 0, updated: 0, errors: 0 }),
+      reconcileUser: () => Promise.resolve({ checked: 0, updated: 0, errors: 0, stuck: 0 }),
       syncOrder: () => Promise.resolve(s.sync),
     },
   };

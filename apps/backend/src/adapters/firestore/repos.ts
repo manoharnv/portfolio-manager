@@ -104,11 +104,12 @@ export function createProposalRepo(db: FsDb): ProposalRepo {
       });
     },
 
-    async listPending(uid: string): Promise<Proposal[]> {
+    async listByStatus(uid: string, statuses: readonly ProposalStatus[]): Promise<Proposal[]> {
+      if (statuses.length === 0) return [];
       const snap = await db
         .collection('proposals')
         .where('uid', '==', uid)
-        .where('status', '==', 'pending')
+        .where('status', 'in', [...statuses])
         .get();
       return decodeAll('proposals', snap.docs, ProposalSchema);
     },
@@ -142,6 +143,16 @@ export function createOrderRepo(db: FsDb): OrderRepo {
         .where('status', 'in', OPEN_ORDER_STATUSES)
         .get();
       return decodeAll('orders', snap.docs, OrderRecordSchema);
+    },
+
+    async findByProposal(uid: string, proposalId: string): Promise<OrderRecord | undefined> {
+      const snap = await db
+        .collection('orders')
+        .where('uid', '==', uid)
+        .where('proposalId', '==', proposalId)
+        .limit(1)
+        .get();
+      return decodeAll('orders', snap.docs, OrderRecordSchema)[0];
     },
 
     async listApprovedBetween(uid: string, fromIso: string, toIso: string): Promise<OrderRecord[]> {

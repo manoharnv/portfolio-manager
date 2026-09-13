@@ -325,6 +325,7 @@ export function makeBackendConfig(patch?: Deep<BackendConfig>): BackendConfig {
       reconcileIntervalMs: 15_000,
       portfolioRefreshIntervalMs: 60_000,
       simulatorFillAfterMs: 2_000,
+      stuckProposalAfterMs: 300_000,
       marketHolidays: [],
     },
     patch,

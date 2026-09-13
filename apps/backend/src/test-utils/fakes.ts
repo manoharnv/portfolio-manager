@@ -161,9 +161,9 @@ export class FakeProposalRepo implements ProposalRepo {
     return Promise.resolve({ ok: true, proposal: next });
   }
 
-  listPending(uid: string): Promise<Proposal[]> {
+  listByStatus(uid: string, statuses: readonly ProposalStatus[]): Promise<Proposal[]> {
     return Promise.resolve(
-      [...this.docs.values()].filter((p) => p.uid === uid && p.status === 'pending'),
+      [...this.docs.values()].filter((p) => p.uid === uid && statuses.includes(p.status)),
     );
   }
 
@@ -199,6 +199,12 @@ export class FakeOrderRepo implements OrderRepo {
     const open = ['SUBMITTED', 'OPEN', 'PARTIAL', 'UNKNOWN'];
     return Promise.resolve(
       [...this.docs.values()].filter((o) => o.uid === uid && open.includes(o.status)),
+    );
+  }
+
+  findByProposal(uid: string, proposalId: string): Promise<OrderRecord | undefined> {
+    return Promise.resolve(
+      [...this.docs.values()].find((o) => o.uid === uid && o.proposalId === proposalId),
     );
   }
 

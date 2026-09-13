@@ -5,18 +5,27 @@
  * truth: poll `getOrder` for every still-open order, update `orders`, drive the
  * proposal to its terminal state, and keep the per-book ledger honest.
  *
- * Ledger rule (docs/10 §10.4): execution writes a *provisional* entry so the
- * sleeve's capital and its ownership are attributed the moment an order leaves.
- * Reconciliation is what makes that entry true — it is rewritten (same id) to
- * the quantity and price that actually **filled**, and removed entirely when
- * nothing filled. `deployedInr` is then recomputed from the ledger, which
- * docs/10 §10.3 names as its definition, so a partial fill or a reject can never
- * leave a sleeve over-committed.
+ * **The ledger records fills, and only fills** (docs/10 §10.4). A row appears
+ * the first time an order fills any quantity, carrying the *cumulative* filled
+ * quantity and average price, and is updated in place (same id `led_<orderId>`)
+ * as more fills arrive. An order that is rejected or cancelled without filling
+ * never gets a row at all. That is what makes `canExit` mean "the book owns
+ * this", so a day-trade square-off can never sell shares that are still in
+ * flight.
+ *
+ * Capital is still held while an order is open — see `reservations.ts`. After
+ * every change this module recomputes
+ *   `deployedInr = Σ filled cost basis + Σ unfilled remainder of open orders`,
+ * so a reject releases exactly what it reserved, with no stored delta to drift.
+ *
+ * It also sweeps proposals that got stuck in `approved`/`placing` — a crash
+ * between the state write and the broker call would otherwise leave a proposal
+ * pinned forever, and its reservation with it.
  */
 
-import { positionsByBook, symbolKey } from '@pm/core';
+import { canTransition, symbolKey } from '@pm/core';
 import type { OrderStatus, OrderStatusCode } from '@pm/core';
-import type { LedgerEntry, OrderRecord, Proposal } from '@pm/core';
+import type { LedgerEntry, OrderRecord, ProposalStatus } from '@pm/core';
 import type { Logger } from '../logger.js';
 import type {
   BookRepo,
@@ -28,6 +37,7 @@ import type {
   ProposalRepo,
 } from '../ports/index.js';
 import type { AuditWriter } from './audit.js';
+import { deployedInrFor, type OpenReservation } from './reservations.js';
 
 /** Statuses the reconciler must keep polling. */
 export const OPEN_STATUSES: readonly OrderStatusCode[] = [
@@ -45,6 +55,12 @@ export const TERMINAL_STATUSES: readonly OrderStatusCode[] = [
   'EXPIRED',
 ];
 
+/** A proposal parked in `approved`/`placing` this long is presumed abandoned. */
+export const DEFAULT_STUCK_AFTER_MS = 5 * 60 * 1000;
+
+/** Non-terminal states the backend owns; nobody else can move them on. */
+const STUCK_CANDIDATE_STATUSES: readonly ProposalStatus[] = ['approved', 'placing'];
+
 export interface ReconcileDeps {
   orders: OrderRepo;
   proposals: ProposalRepo;
@@ -55,12 +71,16 @@ export interface ReconcileDeps {
   clock: Clock;
   ids: IdGenerator;
   logger: Logger;
+  /** Defaults to {@link DEFAULT_STUCK_AFTER_MS}. */
+  stuckAfterMs?: number | undefined;
 }
 
 export interface ReconcileSummary {
   checked: number;
   updated: number;
   errors: number;
+  /** Proposals moved out of a stuck `approved`/`placing` state. */
+  stuck: number;
 }
 
 export type SyncResult =
@@ -68,20 +88,40 @@ export type SyncResult =
   | { ok: false; reason: 'NOT_FOUND' | 'UNAUTHORIZED' | 'BROKER_ERROR'; detail: string };
 
 export interface ReconcileService {
-  /** Poll every open order for one user. Never throws; errors are counted. */
+  /** Poll every open order for one user, then sweep stuck proposals. Never throws. */
   reconcileUser(uid: string): Promise<ReconcileSummary>;
   /** Re-sync one order from the broker (`GET /v1/orders/:id`). */
   syncOrder(uid: string, orderId: string): Promise<SyncResult>;
 }
 
-/** `deployedInr` as docs/10 §10.3 defines it: open cost basis, from the ledger. */
-export function deployedFromLedger(entries: readonly LedgerEntry[], bookId: string): number {
-  return positionsByBook(entries)
-    .filter((p) => p.bookId === bookId && p.qty !== 0)
-    .reduce((sum, p) => sum + p.costBasisInr, 0);
-}
-
 export function createReconcileService(deps: ReconcileDeps): ReconcileService {
+  const stuckAfterMs = deps.stuckAfterMs ?? DEFAULT_STUCK_AFTER_MS;
+
+  /** Proposal-time LTP, fetched only for orders that carry no price of their own. */
+  async function proposalLtpFor(record: OrderRecord): Promise<number | undefined> {
+    if (record.order.limitPrice !== undefined || record.order.triggerPrice !== undefined) {
+      return undefined;
+    }
+    const proposal = await deps.proposals.get(record.proposalId);
+    return proposal?.marketContext.ltpAtProposal;
+  }
+
+  /** `Σ filled cost basis + Σ open reservations`, recomputed from scratch. */
+  async function recomputeDeployed(uid: string, bookId: OrderRecord['bookId']): Promise<void> {
+    const book = await deps.books.get(uid, bookId);
+    if (book === undefined) return;
+
+    const entries = await deps.ledger.list(uid);
+    const open = await deps.orders.listOpen(uid);
+    const reservations: OpenReservation[] = [];
+    for (const record of open) {
+      reservations.push({ record, proposalLtp: await proposalLtpFor(record) });
+    }
+    await deps.books.patch(uid, bookId, {
+      deployedInr: deployedInrFor(bookId, entries, reservations),
+    });
+  }
+
   async function apply(record: OrderRecord, live: OrderStatus): Promise<boolean> {
     const status = live.status;
     // An UNKNOWN or still-open status is not news — leave the record alone.
@@ -98,17 +138,20 @@ export function createReconcileService(deps: ReconcileDeps): ReconcileService {
       updatedAt: nowIso,
     });
 
-    // --- ledger: keep only what actually filled --------------------------
+    // --- ledger: fills only, upserted in place ----------------------------
     const entryId = deps.ids.ledgerId(record.id);
     if (live.filledQty > 0 && avgFillPrice !== null) {
+      const proposal = await deps.proposals.get(record.proposalId);
       const entry: LedgerEntry = {
         id: entryId,
         uid: record.uid,
         bookId: record.bookId,
-        strategyId: (await strategyIdFor(record)) ?? record.bookId,
+        strategyId: proposal?.strategyId ?? record.bookId,
         symbolKey: symbolKey(record.order.symbol),
         product: record.order.product,
         side: record.order.side,
+        // Cumulative, not incremental: re-appending the same id replaces the row,
+        // so a PARTIAL followed by COMPLETE updates rather than double-counts.
         qty: live.filledQty,
         price: avgFillPrice,
         orderId: record.id,
@@ -116,17 +159,12 @@ export function createReconcileService(deps: ReconcileDeps): ReconcileService {
       };
       await deps.ledger.append(entry);
     } else if (TERMINAL_STATUSES.includes(status)) {
+      // Nothing filled, so there should be no row. Belt and braces.
       await deps.ledger.remove(record.uid, entryId);
     }
 
-    // --- book: recompute the sleeve from the ledger -----------------------
-    const book = await deps.books.get(record.uid, record.bookId);
-    if (book !== undefined) {
-      const entries = await deps.ledger.list(record.uid);
-      await deps.books.patch(record.uid, record.bookId, {
-        deployedInr: deployedFromLedger(entries, record.bookId),
-      });
-    }
+    // --- book: recompute the sleeve from fills + live reservations ---------
+    await recomputeDeployed(record.uid, record.bookId);
 
     // --- proposal + audit -------------------------------------------------
     if (status === 'COMPLETE') {
@@ -167,11 +205,6 @@ export function createReconcileService(deps: ReconcileDeps): ReconcileService {
     return true;
   }
 
-  async function strategyIdFor(record: OrderRecord): Promise<string | undefined> {
-    const proposal: Proposal | undefined = await deps.proposals.get(record.proposalId);
-    return proposal?.strategyId;
-  }
-
   async function syncOne(uid: string, record: OrderRecord): Promise<SyncResult> {
     if (record.brokerOrderId === null) {
       return { ok: true, order: record, changed: false };
@@ -187,6 +220,58 @@ export function createReconcileService(deps: ReconcileDeps): ReconcileService {
     const changed = await apply(record, live);
     const fresh = (await deps.orders.get(record.id)) ?? record;
     return { ok: true, order: fresh, changed };
+  }
+
+  /**
+   * Free proposals abandoned mid-execution.
+   *
+   * Only edges core's state machine already allows are used:
+   * `approved → blocked` and `placing → failed`. A proposal that *does* have an
+   * order record is left alone — that one belongs to the polling loop above, not
+   * here, and calling it "failed" while the broker holds a live order would be
+   * the worst possible lie.
+   */
+  async function sweepStuck(uid: string): Promise<number> {
+    const candidates = await deps.proposals.listByStatus(uid, STUCK_CANDIDATE_STATUSES);
+    const cutoffMs = deps.clock.now().getTime() - stuckAfterMs;
+    let swept = 0;
+
+    for (const proposal of candidates) {
+      const stuckSince = proposal.decidedAt ?? proposal.createdAt;
+      const sinceMs = Date.parse(stuckSince);
+      if (Number.isNaN(sinceMs) || sinceMs > cutoffMs) continue;
+
+      const existing = await deps.orders.findByProposal(uid, proposal.id);
+      if (existing !== undefined) continue;
+
+      const to: ProposalStatus = proposal.status === 'approved' ? 'blocked' : 'failed';
+      if (!canTransition(proposal.status, to)) continue;
+
+      const moved = await deps.proposals.transition(proposal.id, proposal.status, to, {
+        failureReason: 'stuck',
+      });
+      if (!moved.ok) continue;
+
+      await deps.audit.record({
+        uid,
+        type: to === 'blocked' ? 'guardrail.blocked' : 'order.failed',
+        refId: proposal.id,
+        detail: {
+          reason: 'stuck',
+          from: proposal.status,
+          to,
+          stuckSince,
+          stuckAfterMs,
+        },
+      });
+      await recomputeDeployed(uid, proposal.bookId);
+      swept += 1;
+      deps.logger.warn(
+        { uid, proposalId: proposal.id, from: proposal.status, to },
+        'stuck proposal swept',
+      );
+    }
+    return swept;
   }
 
   return {
@@ -206,7 +291,8 @@ export function createReconcileService(deps: ReconcileDeps): ReconcileService {
         }
         if (result.changed) updated += 1;
       }
-      return { checked: open.length, updated, errors };
+      const stuck = await sweepStuck(uid);
+      return { checked: open.length, updated, errors, stuck };
     },
 
     async syncOrder(uid: string, orderId: string): Promise<SyncResult> {

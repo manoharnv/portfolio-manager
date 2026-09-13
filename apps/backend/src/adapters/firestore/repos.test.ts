@@ -99,13 +99,22 @@ describe('proposal repo', () => {
     });
   });
 
-  it('lists only this user’s pending proposals', async () => {
+  it('lists this user’s proposals in the requested statuses', async () => {
     db.seed('proposals/p1', makeProposal());
     db.seed('proposals/p2', makeProposal({ id: 'p2', status: 'placed' }));
     db.seed('proposals/p3', makeProposal({ id: 'p3', uid: 'other' }));
+    db.seed('proposals/p4', makeProposal({ id: 'p4', status: 'approved' }));
+    const repo = createProposalRepo(db);
 
-    const listed = await createProposalRepo(db).listPending('u1');
-    expect(listed.map((p) => p.id)).toEqual(['p1']);
+    expect((await repo.listByStatus('u1', ['pending'])).map((p) => p.id)).toEqual(['p1']);
+    expect((await repo.listByStatus('u1', ['approved', 'placing'])).map((p) => p.id)).toEqual([
+      'p4',
+    ]);
+  });
+
+  it('short-circuits an empty status list rather than issuing a bad query', async () => {
+    db.seed('proposals/p1', makeProposal());
+    expect(await createProposalRepo(db).listByStatus('u1', [])).toEqual([]);
   });
 });
 
@@ -128,6 +137,15 @@ describe('order repo', () => {
     await repo.create(makeOrderRecord({ id: 'c', status: 'OPEN', uid: 'other' }));
 
     expect((await repo.listOpen('u1')).map((o) => o.id)).toEqual(['a']);
+  });
+
+  it('finds the order a proposal produced, scoped to the owner', async () => {
+    const repo = createOrderRepo(db);
+    await repo.create(makeOrderRecord({ id: 'a', proposalId: 'p1' }));
+
+    expect((await repo.findByProposal('u1', 'p1'))?.id).toBe('a');
+    expect(await repo.findByProposal('u1', 'p2')).toBeUndefined();
+    expect(await repo.findByProposal('other', 'p1')).toBeUndefined();
   });
 
   it('lists orders approved inside a half-open window', async () => {

@@ -107,6 +107,8 @@ const RawConfigSchema = z.object({
   PORTFOLIO_REFRESH_INTERVAL_MS: intEnv(60_000, 1_000, 3_600_000),
   /** dry-run/paper only: how long after submission the simulator fills. */
   SIMULATOR_FILL_AFTER_MS: intEnv(2_000, 0, 3_600_000),
+  /** A proposal parked in `approved`/`placing` this long is presumed abandoned. */
+  STUCK_PROPOSAL_AFTER_MS: intEnv(300_000, 1_000, 86_400_000),
 
   /** IST `YYYY-MM-DD` exchange holidays; merged into core's market-hours check. */
   MARKET_HOLIDAYS: csvList.pipe(z.array(IsoDateSchema)),
@@ -127,6 +129,7 @@ export interface BackendConfig {
   reconcileIntervalMs: number;
   portfolioRefreshIntervalMs: number;
   simulatorFillAfterMs: number;
+  stuckProposalAfterMs: number;
   marketHolidays: readonly string[];
 }
 
@@ -191,6 +194,7 @@ export function parseConfig(env: Env): BackendConfig {
     reconcileIntervalMs: raw.RECONCILE_INTERVAL_MS,
     portfolioRefreshIntervalMs: raw.PORTFOLIO_REFRESH_INTERVAL_MS,
     simulatorFillAfterMs: raw.SIMULATOR_FILL_AFTER_MS,
+    stuckProposalAfterMs: raw.STUCK_PROPOSAL_AFTER_MS,
     marketHolidays: raw.MARKET_HOLIDAYS,
   };
 }

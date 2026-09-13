@@ -176,6 +176,7 @@ async function main(): Promise<void> {
     clock,
     ids,
     logger,
+    stuckAfterMs: config.stuckProposalAfterMs,
   });
   const portfolio = createPortfolioService({ broker, cache: portfolioCache, clock, audit });
 
