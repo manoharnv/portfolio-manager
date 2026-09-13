@@ -84,7 +84,27 @@ Run `grep -rn "VERIFY-LIVE" packages/` to find the exact lines.
 | 6 | **Tick placement deviates from docs/05 §5.5 on purpose:** price-taking strategies (DCA, rebalance) run on `intraday` ticks, not pre-open/eod, because a proposal drafted at 09:00 or 15:45 IST can never pass the `marketHours` guardrail and would expire unusable. `StrategyDef.ticks` lets an operator override. | `strategies/*` | — (design note) |
 | 7 | Risk limits are derived defaults (portfolio daily-loss stop = Σ book stops; gross exposure = capital × (100 − reserve)%; concentration 25%) overridable via `HarnessDeps.riskLimits` — `Config` has no `RiskLimits` block yet; promote into core `Config` in a later pass. | `harness.ts` | 🟡 Limits not operator-editable from the app. |
 
-## 11.5 How to run the verification (Phase 1)
+## 11.5 Execution backend — `apps/backend`
+
+| # | Assumption to verify | Where | Risk if wrong |
+|---|---|---|---|
+| 1 | **Firestore transaction semantics.** The idempotency lock and the proposal compare-and-set are read-then-write inside `runTransaction`, relying on Firestore re-running the transaction when a read document changed. The in-memory fake does not model contention. Confirm on the real Admin SDK / emulator with two concurrent executes of the same key. | `adapters/firestore/repos.ts` | 🔴 Double placement under a race. |
+| 2 | `adaptFirestore()` is the one place Admin SDK types are cast onto the narrow `FsDb`; exercise every repo once against a real project or the emulator. | `index.ts` | 🔴 Runtime shape mismatch in prod only. |
+| 3 | Daily token expiry is stored as an `expires-at` **label** on the Secret Manager secret (payload stays opaque). Confirm label charset/length limits; the VM role needs `secretmanager.secrets.get` (labels) + `secretAccessor`, and `set` needs `secretVersionAdder`. | `adapters/secret-manager.ts` | 🟠 Session shows disconnected / token write fails. |
+| 4 | Dhan consent flow: `/v1/auth/dhan/callback` accepts `{ accessToken, expiresAt }` (both required — fail closed) and the login URL comes from `DHAN_CONSENT_URL_TEMPLATE`. Confirm the real consent response fields and URL. | `services/session.ts` | 🟠 Daily Dhan login cannot complete. |
+| 5 | `/v1/admin/whitelist-ip` returns **501** — no adapter exposes an IP-whitelist call; Dhan's "Setup Static IP" API would first need a `BrokerAdapter` method. | `http/app.ts` | 🟡 Manual whitelisting only. |
+| 6 | Kite instruments URL (`https://api.kite.trade/instruments`) is hard-coded in the composition root. | `index.ts` | 🟡 |
+| 7 | Background loops (reconcile, portfolio refresh) iterate `ALLOWED_UIDS` — the single-user/family model of docs/04 §4.9, not a user index. | `index.ts` | 🟡 Multi-tenant would need a change. |
+| 8 | Biometric assertion: presence is enforced when `config.guardrails.requireBiometric`; the assertion is **not** cryptographically verified server-side. | `services/execution.ts` | 🟡 Relies on app-side gating. |
+
+**Design decisions recorded (deviations from the docs/04 flowchart, all fail-closed)**
+- The human's approval is written (`pending → approved`, audited) *before* the guardrail suite runs, because the state machine only reaches `blocked` from `approved`. A refusal before that point (kill switch, market closed, session invalid) leaves the proposal `pending` and retryable with a fresh idempotency key.
+- `clientSeenLtp` is **required** (400 without it); absence can never be a skip.
+- A market-data / funds / instrument fetch failure returns `BROKER_ERROR` (or `SESSION_INVALID` on `AUTH_EXPIRED`), burns the idempotency key, audits `order.failed`, and leaves the proposal `pending` — nothing reached the broker.
+- Order postbacks (`/v1/broker/:broker/postback`) are not implemented; status is reconciled by polling.
+- **Ledger attribution happens on fill, not submission** (budget is *reserved* at submission and released exactly on reject/cancel) — see the reconcile service. This closes the path where an unfilled BUY could let the day-trade book's EOD square-off sell shares it never received.
+
+## 11.6 How to run the verification (Phase 1)
 
 1. Use a **read-only day**: no order APIs are exercised until §11.1 items 1–9 are green.
 2. Load the live scrip master → assert a handful of known instruments (RELIANCE NSE_EQ,
