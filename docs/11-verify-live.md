@@ -61,7 +61,18 @@ Run `grep -rn "VERIFY-LIVE" packages/` to find the exact lines.
 
 ---
 
-## 11.3 How to run the verification (Phase 1)
+## 11.3 Cloud Functions — `functions/`
+
+| # | Assumption to verify | Where | Risk if wrong |
+|---|---|---|---|
+| 1 | `firestore.rules` are verified only by the manual emulator checklist in `functions/README.md` (`@firebase/rules-unit-testing` deliberately not installed). Run that checklist before the app ships. | `firestore.rules` | 🔴 A wrong rule is a client-side privilege hole. |
+| 2 | Audit `detail` field names the push handler reads (`reason`, `killSwitch`, `broker`, `ip`) must match what `apps/backend` actually writes — `AuditEvent.detail` is an untyped record in core. | `handlers/onAuditEvent.ts` | 🟠 Pushes with empty/wrong text. |
+| 3 | FCM dead-token codes used for pruning (`messaging/registration-token-not-registered`, `messaging/invalid-registration-token`) taken from firebase-admin 13.10's error source, not a live send. | `notify.ts` | 🟡 Dead tokens never pruned (noise) or live ones pruned (missed pushes). |
+| 4 | Scheduler syntax + timezone (`every 1 minutes`; `45 8 * * 1-5` in `Asia/Kolkata`) and Cloud Scheduler support in `asia-south1`. | `index.ts` | 🟡 Expiry sweep / morning reminder never fire. |
+| 5 | 2nd-gen trigger payload shapes (`FirestoreEvent`, `Change<QueryDocumentSnapshot>`) confirmed from `firebase-functions@6` typings, not an emulator run. | `index.ts` | 🟡 Handlers receive unexpected shapes. |
+| 6 | TTL policies are **not** deployable from `firestore.indexes.json` — set via `gcloud firestore fields ttls update` for `proposals.ttlExpiresAt` and `idempotency.createdAt` (see `functions/README.md`). | infra | 🟡 Expired docs accumulate (functional impact nil: the sweep flips status first). |
+
+## 11.4 How to run the verification (Phase 1)
 
 1. Use a **read-only day**: no order APIs are exercised until §11.1 items 1–9 are green.
 2. Load the live scrip master → assert a handful of known instruments (RELIANCE NSE_EQ,

@@ -10,7 +10,15 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],
       include: ['src/**/*.ts'],
-      exclude: ['src/**/*.test.ts', 'src/test-utils.ts', 'src/test-utils/**', 'src/index.ts'],
+      exclude: [
+        'src/**/*.test.ts',
+        'src/test-utils.ts',
+        'src/test-utils/**',
+        'src/index.ts',
+        // Thin, untested Firebase Admin SDK wiring (docs/00 §0.5) — everything
+        // with actual logic is tested against src/test-utils/fakes.ts instead.
+        'src/adapters/**',
+      ],
       thresholds: {
         lines: 85,
         statements: 85,

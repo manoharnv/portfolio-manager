@@ -1,0 +1,146 @@
+rules_version = '2';
+
+// Firestore security rules for the stock-portfolio-manager project.
+//
+// docs/03-data-model.md §3.9 is the base sketch, implemented verbatim below
+// (same collections, same conditions) and extended per docs/10-multi-strategy.md
+// §10.8 with `users`, `books`, `ledger`, `mandates` and a precise `strategies`
+// match. Everything else defaults to deny (Firestore's own default, made
+// explicit at the bottom of this file).
+//
+// Rationale (docs/03 §3.9, restated): the strategy engine and execution
+// backend use the Firebase Admin SDK (a service account) and bypass these
+// rules entirely — `allow ...: if false` blocks the *client app*, never the
+// trusted server processes. `orders`, `auditLog`, `idempotency`, `books` and
+// `ledger` are never client-writable, which is what makes them tamper-evident
+// (docs/07-security-compliance.md §7.7).
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    function isOwner(uid) { return request.auth != null && request.auth.uid == uid; }
+
+    // -----------------------------------------------------------------
+    // docs/03 §3.9 — implemented verbatim
+    // -----------------------------------------------------------------
+
+    // docs/03 §3.2 config/{uid} — the control panel.
+    // App reads its own data; writes are tightly constrained.
+    match /config/{uid} {
+      allow read: if isOwner(uid);
+      // app may edit guardrails / killSwitch / tradingEnabled / capital, but NOT
+      // environment (docs/04 §4.8), activeBroker (switched only via the backend,
+      // docs/06 §6.3) or uid. The backend re-clamps caps to code ceilings anyway.
+      allow update: if isOwner(uid)
+        && request.resource.data.environment == resource.data.environment
+        && request.resource.data.activeBroker == resource.data.activeBroker
+        && request.resource.data.uid == resource.data.uid;
+      allow create, delete: if false;         // backend/admin only
+    }
+
+    // docs/03 §3.3 proposals/{proposalId} — the heart of the system.
+    match /proposals/{id} {
+      allow read: if isOwner(resource.data.uid);
+      // App cannot create proposals (only the strategy engine via Admin SDK can).
+      allow create: if false;
+      // App may ONLY reject a still-pending proposal, and may touch nothing but
+      // the decision fields (so the order, rationale, book, TTL etc. are frozen);
+      // approvals go through backend REST. decidedBy, if set, must be the caller.
+      allow update: if isOwner(resource.data.uid)
+        && resource.data.status == 'pending'
+        && request.resource.data.status == 'rejected'
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'decidedBy', 'decidedAt'])
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['decidedBy'])
+             || request.resource.data.decidedBy == request.auth.uid);
+      allow delete: if false;
+    }
+
+    // docs/03 §3.4 orders/{orderId} — execution records (backend-owned).
+    match /orders/{id} {
+      allow read: if isOwner(resource.data.uid);
+      allow write: if false;                   // backend (Admin SDK) only
+    }
+
+    // docs/03 §3.6 portfolio/{uid}/... — cached read model.
+    match /portfolio/{uid}/{doc=**} {
+      allow read: if isOwner(uid);
+      allow write: if false;                   // backend only
+    }
+
+    // docs/03 §3.5 brokerSessions/{uid}/brokers/{broker} — non-secret session status.
+    match /brokerSessions/{uid}/{doc=**} {
+      allow read: if isOwner(uid);
+      allow write: if false;                   // backend only
+    }
+
+    // docs/03 §3.7 auditLog/{eventId} — append-only ledger.
+    // docs/07 §7.7: "append-only, client-unwritable" — never mutated once written.
+    match /auditLog/{id} {
+      allow read: if isOwner(resource.data.uid);
+      allow create, update, delete: if false;  // backend only; never mutated
+    }
+
+    // docs/03 §3.8 idempotency/{idempotencyKey} — execution de-dupe guard.
+    match /idempotency/{key} { allow read, write: if false; }   // backend only
+
+    // docs/03 §3.1 strategies/{uid}/defs/{strategyId} — strategy configs/params.
+    match /strategies/{uid}/defs/{strategyId} {
+      allow read: if isOwner(uid);
+      allow write: if false;                   // backend only
+    }
+
+    // -----------------------------------------------------------------
+    // Extensions — docs/10-multi-strategy.md §10.8
+    // -----------------------------------------------------------------
+
+    // users/{uid} — profile + notification state. Not itself a docs/10 §10.8
+    // addition, but needed by the same principle: owner read, and the owner
+    // may update ONLY the two client-owned fields — `fcmTokens` (device push
+    // tokens; pruned by functions/src/notify.ts when FCM reports one dead)
+    // and `prefs` (notification/display preferences). Every other field is
+    // backend/admin-provisioned.
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fcmTokens', 'prefs']);
+      allow create, delete: if false;          // backend/admin only
+    }
+
+    // docs/10 §10.8 books/{uid}/books/{bookId} — capital sleeves (§10.3).
+    // Owner read; client write false — only the backend/coordinator computes
+    // deployedInr/realizedPnlInr from the ledger, so a client write here could
+    // let a book claim budget it hasn't earned.
+    match /books/{uid}/books/{bookId} {
+      allow read: if isOwner(uid);
+      allow write: if false;
+    }
+
+    // docs/10 §10.8 ledger/{uid}/entries/{entryId} — position attribution (§10.4).
+    // Owner read; client write false — same tamper-evidence rationale as
+    // `orders`/`auditLog` above: per-book position reconstruction must be
+    // trustworthy, so only the backend appends entries.
+    match /ledger/{uid}/entries/{entryId} {
+      allow read: if isOwner(uid);
+      allow write: if false;
+    }
+
+    // docs/10 §10.8 mandates/{uid}/mandates/{mandateId} — bounded auto-exec
+    // sessions, Option B (§10.7). "Mandates are backend-owned, biometric-gated
+    // to create, and auto-expire" — activation goes through the backend REST
+    // API (which asserts the biometric confirmation) and never a direct
+    // client write.
+    match /mandates/{uid}/mandates/{mandateId} {
+      allow read: if isOwner(uid);
+      allow write: if false;
+    }
+
+    // -----------------------------------------------------------------
+    // Default deny. Firestore already denies anything with no matching
+    // `allow`; this makes that explicit for any collection added later
+    // without a corresponding rule (docs/00 §0.7 "fail closed").
+    // -----------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
