@@ -1,0 +1,34 @@
+# Copy to terraform.tfvars (git-ignored — see /.gitignore) and fill in real
+# values. Everything here is a PLACEHOLDER: no real project id, domain,
+# email, or uid belongs in this repo (docs/00 §0.7 / task hard rules).
+
+# Dedicated GCP project created in infra/README.md Phase 0 — never an
+# existing/shared project (blast-radius isolation, docs/08 §8.1).
+project_id = "your-portfolio-mgr-project-id"
+
+region = "asia-south1"
+zone   = "asia-south1-a"
+
+machine_type = "e2-micro"
+
+# Public hostname you'll point at the reserved static IP output by this
+# module (an A record — see infra/README.md). Caddy requests a Let's
+# Encrypt cert for this exact name.
+domain = "pm.example.com"
+
+# Firebase Auth uids allowed to call the backend (config.ts ALLOWED_UIDS).
+# Empty denies everyone (fail closed) — you MUST list at least your own uid
+# before setting ENVIRONMENT=prod in backend.env.
+allowed_uids = ["REPLACE_WITH_YOUR_FIREBASE_UID"]
+
+# Where Cloud Monitoring alerts go.
+alert_email = "you@example.com"
+
+image = "debian-cloud/debian-12"
+
+enable_staging_vm = false
+
+# Point these at your own fork/branch if you're not deploying
+# manoharnv/portfolio-manager directly.
+repo_url = "https://github.com/manoharnv/portfolio-manager.git"
+repo_ref = "main"

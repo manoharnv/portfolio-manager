@@ -1,0 +1,79 @@
+name: CI
+
+# docs/08 §8.6: "CI (GitHub Actions): typecheck, lint, unit tests ..., then
+# deploy on tag." This workflow is the first half (verification); deploy.yml
+# is the second (manual, gated). docs/00 §0.8: "Before handing work over,
+# all four of install, typecheck, test, lint must pass from the repo root."
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+  pull_request:
+    branches:
+      - main
+      - 'feat/**'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: typecheck / test / lint / build / format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Must run before actions/setup-node's `cache: pnpm` option, which
+      # needs a pnpm binary on PATH to resolve the cache key.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # docs/00 §0.8 order. turbo's own task graph (turbo.json
+      # `dependsOn: ["^build"]` for typecheck/test) builds each package's
+      # workspace *dependencies* before typechecking/testing it regardless
+      # of this step ordering — this is not a hidden footgun, just turbo
+      # doing its job.
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            packages/*/coverage/**
+            apps/*/coverage/**
+            functions/coverage/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      - name: Format check
+        run: pnpm format:check

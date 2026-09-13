@@ -1,0 +1,64 @@
+# infra/vm/pm-backend.service — docs/08 §8.2, docs/01 §1.3.
+#
+# The ONLY process on this box with broker order credentials and a network
+# path to broker order endpoints. Runs as its own unprivileged OS user
+# (`pm-backend`, no login shell) so a compromise of the strategy unit's
+# process (separate user, separate systemd unit) cannot read this unit's
+# memory, files, or environment.
+#
+# Installed to /etc/systemd/system/pm-backend.service by bootstrap.sh.
+
+[Unit]
+Description=Portfolio manager — execution backend (order-capable, static IP)
+Documentation=https://github.com/manoharnv/portfolio-manager/blob/main/docs/04-execution-backend.md
+After=network-online.target
+Wants=network-online.target
+# Caddy proxies to this unit; start order doesn't strictly matter (Caddy
+# retries on connection refused) but this keeps `systemctl status` order sane.
+Before=caddy.service
+
+[Service]
+Type=simple
+User=pm-backend
+Group=pm-backend
+WorkingDirectory=/opt/pm
+EnvironmentFile=/etc/pm/backend.env
+ExecStart=/usr/bin/node apps/backend/dist/index.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+# --- Sandboxing (docs/08 §8.2: "isolated as separate systemd services /
+# users"; docs/07 §7.3 layer 6 "network") -----------------------------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RemoveIPC=true
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# NOT MemoryDenyWriteExecute — Node/V8's JIT needs writable+executable
+# memory mappings; enabling this can crash or cripple the runtime.
+
+# /opt/pm is read-only at runtime (ProtectSystem=strict + no ReadWritePaths
+# below): the backend only makes outbound HTTPS calls (Firestore, Secret
+# Manager, brokers) and listens on 127.0.0.1:$PORT — it has no local file to
+# write. PrivateTmp=true still gives it an isolated /tmp if something
+# transient ever needs one. Add a ReadWritePaths= line here (and re-run
+# bootstrap.sh) if a future feature needs local disk state.
+
+[Install]
+WantedBy=multi-user.target
