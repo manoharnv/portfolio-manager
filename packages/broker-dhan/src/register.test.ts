@@ -136,6 +136,48 @@ describe('createDhanAdapter', () => {
     await expect(adapter.getSessionStatus()).resolves.toEqual({ broker: 'dhan', connected: false });
   });
 
+  it('uses BrokerCreds.dhan.expiresAt when no session resolver is supplied', async () => {
+    const { session: _drop, ...rest } = deps();
+    const future = new Date(FIXED_NOW.getTime() + 6 * 60 * 60 * 1000).toISOString();
+    const adapter = createDhanAdapter(
+      {
+        broker: 'dhan',
+        dhan: {
+          clientId: TEST_SESSION.clientId,
+          accessToken: TEST_SESSION.accessToken,
+          expiresAt: future,
+        },
+      },
+      { ...rest, clock: () => FIXED_NOW },
+    );
+    await expect(adapter.getSessionStatus()).resolves.toEqual({
+      broker: 'dhan',
+      connected: true,
+      expiresAt: future,
+    });
+  });
+
+  it('fails closed when BrokerCreds.dhan.expiresAt is already in the past', async () => {
+    const { session: _drop, ...rest } = deps();
+    const past = new Date(FIXED_NOW.getTime() - 60_000).toISOString();
+    const adapter = createDhanAdapter(
+      {
+        broker: 'dhan',
+        dhan: {
+          clientId: TEST_SESSION.clientId,
+          accessToken: TEST_SESSION.accessToken,
+          expiresAt: past,
+        },
+      },
+      { ...rest, clock: () => FIXED_NOW },
+    );
+    await expect(adapter.getSessionStatus()).resolves.toEqual({
+      broker: 'dhan',
+      connected: false,
+      expiresAt: past,
+    });
+  });
+
   it('reports the expiry the session resolver provides', async () => {
     const adapter = createDhanAdapter(creds, deps());
     await expect(adapter.getSessionStatus()).resolves.toEqual({

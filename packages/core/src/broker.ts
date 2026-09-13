@@ -59,8 +59,13 @@ export interface BrokerAdapter extends BrokerReadAdapter {
  */
 export interface BrokerCreds {
   broker: Broker;
-  dhan?: { clientId: string; accessToken: string } | undefined;
-  kite?: { apiKey: string; accessToken: string } | undefined;
+  /**
+   * `expiresAt` is the ISO expiry of the daily access token, stored alongside it
+   * (docs/02 §2.8). Without it an adapter cannot observe true expiry and must
+   * report `connected: false` — fail closed, never assume a token is live.
+   */
+  dhan?: { clientId: string; accessToken: string; expiresAt?: string | undefined } | undefined;
+  kite?: { apiKey: string; accessToken: string; expiresAt?: string | undefined } | undefined;
 }
 
 export type ReadAdapterFactory = (creds: BrokerCreds) => BrokerReadAdapter;

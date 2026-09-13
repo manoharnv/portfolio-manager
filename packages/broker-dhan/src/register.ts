@@ -33,11 +33,12 @@ export interface DhanFactoryDeps {
   /**
    * Turns credentials into a session *with an expiry*.
    *
-   * `BrokerCreds.dhan` carries only `{clientId, accessToken}`, so without this
-   * the adapter has no expiry to report and `getSessionStatus()` answers
+   * By default the session is read straight off `BrokerCreds.dhan`, including
+   * its optional `expiresAt` (docs/02 §2.4). When the credentials carry no
+   * expiry, the adapter has none to report and `getSessionStatus()` answers
    * `connected: false` — fail closed rather than assume a token is live. The
    * backend, which stores the daily token and its expiry in Secret Manager,
-   * supplies this.
+   * either passes `expiresAt` in the creds or supplies this resolver.
    */
   session?: ((creds: BrokerCreds) => DhanSession) | undefined;
   enrichPortfolioPrices?: boolean | undefined;
@@ -45,7 +46,7 @@ export interface DhanFactoryDeps {
   timeoutMs?: number | undefined;
 }
 
-function dhanCreds(creds: BrokerCreds): { clientId: string; accessToken: string } {
+function dhanCreds(creds: BrokerCreds): DhanSession {
   if (creds.broker !== 'dhan') {
     throw new BrokerError('UNKNOWN', `Expected dhan credentials, got broker='${creds.broker}'`);
   }
@@ -56,7 +57,9 @@ function dhanCreds(creds: BrokerCreds): { clientId: string; accessToken: string 
       'No Dhan session: creds.dhan must carry a clientId and a daily accessToken',
     );
   }
-  return { clientId: dhan.clientId, accessToken: dhan.accessToken };
+  const session: DhanSession = { clientId: dhan.clientId, accessToken: dhan.accessToken };
+  if (dhan.expiresAt !== undefined) session.expiresAt = dhan.expiresAt;
+  return session;
 }
 
 function toAdapterDeps(creds: BrokerCreds, deps: DhanFactoryDeps): DhanAdapterDeps {

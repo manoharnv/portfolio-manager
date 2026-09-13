@@ -44,6 +44,8 @@ export interface InstrumentRef {
   exchangeSegmentCode: string;  // Dhan "NSE_EQ" | Kite "NSE"
   lotSize: number;
   tickSize: number;
+  instrumentType?: string;      // broker instrument class some endpoints need (Dhan charts: EQUITY/OPTIDX…)
+  expiryCode?: number;          // Dhan derivative expiry code for charts
 }
 
 export type Side = 'BUY' | 'SELL';
@@ -168,6 +170,11 @@ export interface BrokerAdapter extends BrokerReadAdapter {
 }
 ```
 
+> **Implementation rule:** every adapter method is `async`. Validation and instrument
+> resolution happen *inside* the returned promise, so callers only ever see rejections —
+> never a synchronous throw that escapes a `.catch()`. (Found the hard way in the Kite
+> adapter; both adapters now comply.)
+
 The strategy engine imports **only** `BrokerReadAdapter` and is constructed with a
 read-scoped token. It has no `placeOrder` method to call and no order credentials in
 its process env. (Type-level + credential-level + network-level enforcement — three
@@ -182,9 +189,11 @@ Broker selection is **config-driven** and stored per user in Firestore
 // packages/core/src/factory.ts
 export interface BrokerCreds {
   broker: Broker;
-  // resolved from Secret Manager at runtime; shapes differ per broker
-  dhan?: { clientId: string; accessToken: string };
-  kite?: { apiKey: string; accessToken: string };
+  // resolved from Secret Manager at runtime; shapes differ per broker.
+  // expiresAt = ISO expiry of the daily access token, stored alongside it (§2.8);
+  // without it the adapter cannot observe true expiry and fails closed.
+  dhan?: { clientId: string; accessToken: string; expiresAt?: string };
+  kite?: { apiKey: string; accessToken: string; expiresAt?: string };
 }
 
 export function createReadAdapter(creds: BrokerCreds): BrokerReadAdapter { /* ... */ }

@@ -32,6 +32,10 @@ export interface InstrumentRef {
   exchangeSegmentCode: string;
   lotSize: number;
   tickSize: number;
+  /** Broker instrument class some endpoints need (Dhan charts: EQUITY / OPTIDX / …). */
+  instrumentType?: string | undefined;
+  /** Dhan derivative expiry code, required by its chart endpoints. */
+  expiryCode?: number | undefined;
 }
 
 export type Side = 'BUY' | 'SELL';
