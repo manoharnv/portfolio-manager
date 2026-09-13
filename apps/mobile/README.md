@@ -100,6 +100,18 @@ pnpm --filter @pm/mobile clean
 > **Never run `expo prebuild --clean`** on a tree that already has hand-managed
 > native files — it wipes signing config and the Google service files.
 
+### SPM is disabled on purpose
+
+RNFB ≥ 26 resolves `firebase-ios-sdk` through **Swift Package Manager** by default,
+and SPM only works with `use_frameworks! :linkage => :dynamic`; with CocoaPods'
+default static libraries `pod install` stops with
+"SPM + static linkage is not supported". `app.config.ts` therefore passes
+`{ ios: { disableSPM: true } }` to the `@react-native-firebase/app` plugin, which
+writes `$RNFirebaseDisableSPM = true` above the target block so Firebase comes
+from CocoaPods again. That is the path the modular-header recipe below is for.
+(Dynamic frameworks would be the alternative, but they are the less-exercised
+path for Expo modules and would invalidate the house recipe.)
+
 ### The iOS Podfile: three modular-header lines (applied automatically)
 
 The config plugin `plugins/with-firebase-modular-headers.js` (registered in

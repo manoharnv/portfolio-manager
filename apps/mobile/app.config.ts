@@ -76,7 +76,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     // RNFB 26 *does* ship `@react-native-firebase/messaging/app.plugin.js`, but
     // it only toggles APNs/auto-init flags and messaging works without it; see
     // README "Firebase split" before adding it.
-    '@react-native-firebase/app',
+    //
+    // `disableSPM`: RNFB 26 resolves firebase-ios-sdk through Swift Package
+    // Manager by default, which requires DYNAMIC frameworks and refuses the
+    // CocoaPods default (static libraries). Opting out keeps Firebase on
+    // CocoaPods — the classic path the LIGHT-stack Podfile recipe applied by
+    // `with-firebase-modular-headers` was verified on (README §3).
+    ['@react-native-firebase/app', { ios: { disableSPM: true } }],
     // Applies the RNFB LIGHT-stack Podfile lines on every prebuild (README §3).
     './plugins/with-firebase-modular-headers',
     'expo-local-authentication',
