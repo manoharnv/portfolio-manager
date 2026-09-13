@@ -29,6 +29,7 @@ import {
   buildPosition,
   buildProposal,
   buildSessionPayload,
+  buildStrategyDef,
   fakeApiClient,
   isoPlus,
   withApp,
@@ -411,14 +412,94 @@ describe('Broker Connect', () => {
     expect(screen.getByTestId('connect-kite')).toHaveTextContent(/Backend unreachable/);
   });
 
-  // config.activeBroker is not client-writable and has no backend route.
-  it('states plainly that switching the active broker is not available', async () => {
+  it('switches the active broker through the backend, never Firestore', async () => {
+    const setActiveBroker = jest.fn(async () => ({
+      ok: true as const,
+      activeBroker: 'dhan' as const,
+    }));
+    const refreshSession = jest.fn(async () => undefined);
+    setBackendForTests(fakeApiClient({ setActiveBroker }));
+
+    await withApp(<BrokerScreen />, { refreshSession });
+    await fireEvent.press(screen.getByTestId('make-active-dhan'));
+    await act(async () => undefined);
+
+    expect(setActiveBroker).toHaveBeenCalledWith('dhan');
+    // config.activeBroker is rules-locked: nothing may be written directly.
+    expect(fs().updates).toEqual([]);
+    expect(screen.getByTestId('broker-message')).toHaveTextContent(/dhan is now the active broker/);
+    expect(refreshSession).toHaveBeenCalled();
+  });
+
+  it('offers the daily login first when the backend answers 409', async () => {
+    const setActiveBroker = jest.fn(async () => ({
+      ok: false as const,
+      reason: 'SESSION_INVALID' as const,
+      detail: 'dhan has no session for today',
+      status: 409,
+      needsLogin: true,
+    }));
+    const loginUrl = jest.fn(async () => ({
+      ok: true as const,
+      broker: 'dhan' as const,
+      url: 'https://auth.dhan.co/consent',
+      verifyLive: true,
+    }));
+    setBackendForTests(fakeApiClient({ setActiveBroker, loginUrl }));
+
+    await withApp(<BrokerScreen />);
+    await fireEvent.press(screen.getByTestId('make-active-dhan'));
+    await act(async () => undefined);
+
+    const banner = screen.getByTestId('broker-message');
+    expect(banner).toHaveTextContent(/dhan is not connected today/);
+    expect(banner).toHaveTextContent(/no session for today/);
+
+    // The banner's action runs that broker's login.
+    await fireEvent.press(screen.getByTestId('broker-message-action'));
+    await act(async () => undefined);
+    expect(loginUrl).toHaveBeenCalledWith('dhan');
+  });
+
+  it('reports a non-409 switch refusal without offering a login', async () => {
+    setBackendForTests(
+      fakeApiClient({
+        setActiveBroker: async () => ({
+          ok: false,
+          reason: 'FORBIDDEN',
+          detail: 'uid not permitted',
+          status: 403,
+        }),
+      }),
+    );
+    await withApp(<BrokerScreen />);
+    await fireEvent.press(screen.getByTestId('make-active-dhan'));
+    await act(async () => undefined);
+
+    expect(screen.getByTestId('broker-message')).toHaveTextContent(/Account not permitted/);
+    expect(screen.queryByTestId('broker-message-action')).toBeNull();
+  });
+
+  it('shows no switch control for the broker that is already active', async () => {
+    setBackendForTests(fakeApiClient());
+    await withApp(<BrokerScreen />);
+    expect(screen.queryByTestId('make-active-kite')).toBeNull();
+    expect(screen.getByTestId('active-note-kite')).toBeTruthy();
+    expect(screen.getByTestId('make-active-dhan')).toBeTruthy();
+  });
+
+  it('disables the switch while the backend is unreachable', async () => {
+    setBackendForTests(fakeApiClient());
+    await withApp(<BrokerScreen />, { backendReachable: false });
+    expect(screen.getByTestId('make-active-dhan')).toHaveTextContent(/Backend unreachable/);
+  });
+
+  it('explains that switching goes through the backend', async () => {
     setBackendForTests(fakeApiClient());
     await withApp(<BrokerScreen />);
     expect(screen.getByTestId('switch-broker-note')).toHaveTextContent(
-      /not available from the app/,
+      /POST \/v1\/config\/active-broker/,
     );
-    expect(fs().updates).toEqual([]);
   });
 });
 
@@ -450,6 +531,115 @@ describe('Settings', () => {
     await fireEvent(screen.getByTestId('trading-enabled'), 'valueChange', false);
     await act(async () => undefined);
     expect(screen.getByTestId('settings-error')).toHaveTextContent(/permission-denied/);
+  });
+
+  it('lists strategies and toggles one through the backend', async () => {
+    const patchStrategy = jest.fn(async () => ({
+      ok: true as const,
+      def: { id: 'mean-reversion-v1', enabled: false },
+    }));
+    setBackendForTests(fakeApiClient({ patchStrategy }));
+
+    await withApp(<SettingsScreen />);
+    await act(async () =>
+      fs().emitCollection('strategies/u1/defs', [
+        { id: 'mean-reversion-v1', data: buildStrategyDef() },
+      ]),
+    );
+
+    expect(screen.getByText('Mean reversion')).toBeTruthy();
+    await fireEvent(screen.getByTestId('strategy-mean-reversion-v1-enabled'), 'valueChange', false);
+    await act(async () => undefined);
+
+    expect(patchStrategy).toHaveBeenCalledWith('mean-reversion-v1', { enabled: false });
+    // strategies/{uid}/defs is read-only for the client.
+    expect(fs().updates).toEqual([]);
+  });
+
+  it('rolls the toggle back and says why when the patch fails', async () => {
+    setBackendForTests(
+      fakeApiClient({
+        patchStrategy: async () => ({
+          ok: false,
+          reason: 'NOT_FOUND',
+          detail: 'no such strategy',
+          status: 404,
+        }),
+      }),
+    );
+
+    await withApp(<SettingsScreen />);
+    await act(async () =>
+      fs().emitCollection('strategies/u1/defs', [
+        { id: 'mean-reversion-v1', data: buildStrategyDef({ enabled: true }) },
+      ]),
+    );
+
+    await fireEvent(screen.getByTestId('strategy-mean-reversion-v1-enabled'), 'valueChange', false);
+    await act(async () => undefined);
+
+    // Rolled back to the listener's value, with the reason on screen.
+    expect(screen.getByTestId('strategy-mean-reversion-v1-enabled').props.value).toBe(true);
+    expect(screen.getByTestId('strategy-error')).toHaveTextContent(
+      /No strategy "mean-reversion-v1"/,
+    );
+  });
+
+  it('refuses to send params that are not a plain JSON object', async () => {
+    const patchStrategy = jest.fn();
+    setBackendForTests(fakeApiClient({ patchStrategy }));
+
+    await withApp(<SettingsScreen />);
+    await act(async () =>
+      fs().emitCollection('strategies/u1/defs', [
+        { id: 'mean-reversion-v1', data: buildStrategyDef() },
+      ]),
+    );
+
+    await fireEvent.press(screen.getByTestId('strategy-mean-reversion-v1-params-toggle'));
+    await fireEvent.changeText(screen.getByTestId('strategy-mean-reversion-v1-params'), '[1,2]');
+    await fireEvent.press(screen.getByTestId('strategy-mean-reversion-v1-params-save'));
+    await act(async () => undefined);
+
+    expect(patchStrategy).not.toHaveBeenCalled();
+    expect(screen.getByTestId('strategy-mean-reversion-v1-params-error')).toHaveTextContent(
+      /JSON object/,
+    );
+  });
+
+  it('saves valid params and confirms', async () => {
+    const patchStrategy = jest.fn(async () => ({
+      ok: true as const,
+      def: { id: 'mean-reversion-v1', enabled: true },
+    }));
+    setBackendForTests(fakeApiClient({ patchStrategy }));
+
+    await withApp(<SettingsScreen />);
+    await act(async () =>
+      fs().emitCollection('strategies/u1/defs', [
+        { id: 'mean-reversion-v1', data: buildStrategyDef() },
+      ]),
+    );
+
+    await fireEvent.press(screen.getByTestId('strategy-mean-reversion-v1-params-toggle'));
+    await fireEvent.changeText(
+      screen.getByTestId('strategy-mean-reversion-v1-params'),
+      '{"rsiPeriod": 21}',
+    );
+    await fireEvent.press(screen.getByTestId('strategy-mean-reversion-v1-params-save'));
+    await act(async () => undefined);
+
+    expect(patchStrategy).toHaveBeenCalledWith('mean-reversion-v1', {
+      params: { rsiPeriod: 21 },
+    });
+    expect(screen.getByTestId('strategy-mean-reversion-v1-params-saved')).toBeTruthy();
+  });
+
+  it('names the empty state when the engine has registered nothing', async () => {
+    setBackendForTests(fakeApiClient());
+    await withApp(<SettingsScreen />);
+    await act(async () => fs().emitCollection('strategies/u1/defs', []));
+    expect(screen.getByTestId('no-strategies')).toBeTruthy();
   });
 
   it('routes to the guardrails screen and can sign out', async () => {

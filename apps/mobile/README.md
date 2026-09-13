@@ -158,7 +158,9 @@ types/test-globals.d.ts    # typings for the jest.setup.js doubles
 1. `approvalGate()` (`src/lib/proposals.ts`) — a client-side mirror of the
    backend's refusal ladder. Fails closed on: no config, not pending, TTL
    elapsed, kill switch, trading disabled, no broker session, backend
-   unreachable, **no fresh quote**, price outside the collar, failed precheck.
+   unreachable, **no fresh quote** (`GET /v1/quotes`, polled every 5 s while the
+   screen is focused; older than 30 s ⇒ no price), price outside the collar,
+   failed precheck.
    Every failing reason renders; approve is disabled until all are clear.
 2. `runBiometricGate()` — `config.guardrails.requireBiometric` drives it, and a
    device with no sensor/enrolment is a **refusal**, not a skip.
@@ -182,7 +184,13 @@ Only what `firestore.rules` allows, and nothing else:
 | Push token | `users/{uid}.fcmTokens` | `arrayUnion` |
 | Notification prefs | `users/{uid}.prefs` | — |
 
-The kill switch goes through `POST /v1/config/killswitch` — never a direct write.
+Three things the app changes are backend-only, never a Firestore write:
+`POST /v1/config/killswitch`, `POST /v1/config/active-broker` (the Broker
+screen's "Make active"; a 409 `SESSION_INVALID` means the target broker has no
+session today, and the banner then offers to run its daily login), and
+`PATCH /v1/strategies/:id` (Settings → Strategies: an optimistic `enabled`
+toggle that rolls back on error, plus a params editor that only sends a plain
+JSON object of at most 8 KB).
 
 Reject uses the Firestore path rather than `POST /v1/proposals/:id/reject` so
 that saying "no" still works when the backend is unreachable (docs/06 §6.6). The
@@ -252,35 +260,28 @@ Nothing below can be checked from this repo.
    `apps/backend/src/services/session.ts`), and forwarding that through the app
    would put a broker secret in the app, which docs/06 §6.7 forbids. Confirm the
    real Dhan redirect shape before enabling it.
-8. **Biometric + the confirm slide** — the PanResponder path is simulator/device
+8. **Quote route load** — `GET /v1/quotes` is polled once per 5 s per open
+   proposal screen. Confirm that fits the broker's quote rate limit before
+   leaving a proposal open for long stretches.
+9. **Biometric + the confirm slide** — the PanResponder path is simulator/device
    only; the tests drive the equivalent accessibility action.
 
 ---
 
 ## 7. Known gaps / deviations from docs/06
 
-1. **Switching the active broker is not wired** (docs/06 §6.3 (5)).
-   `config.activeBroker` is not client-writable (`firestore.rules`) and the
-   backend exposes **no route** for it — the only `/v1/config/*` route is
-   `killswitch` (`apps/backend/src/http/app.ts`). Rather than invent a contract
-   or attempt a write the rules will bounce, the Broker screen says so plainly.
-   Unblocks when the backend adds e.g. `POST /v1/config/active-broker`.
-2. **Per-strategy on/off and parameters are read-only** (docs/06 §6.3 (6)).
-   `strategies/{uid}/defs/{id}` is `allow write: if false`, and `@pm/core` has no
-   schema for a strategy definition. Settings exposes the master
-   `tradingEnabled` switch and explains where the rest lives.
-3. **"Live LTP" is the cached portfolio price, refreshed on demand.** The
-   backend has no quote route, so `useLiveQuote` seeds from
-   `portfolio/{uid}/{holdings,positions}` and polls
-   `GET /v1/portfolio/holdings|positions` to make the backend rewrite that
-   cache. A price older than 120 s is treated as **no price**, which blocks
-   approval. A symbol you do not already hold has no cached price at all, so it
-   cannot be approved from this app until a quote route exists — this is the
-   most important thing to fix next.
-4. **No mandates UI and no scalp book** — deferred by decision (docs/10 §10.7).
+1. **Strategy definitions have no shared schema.** `@pm/core` does not model
+   `strategies/{uid}/defs/{id}`, so `src/hooks/useStrategies.ts` declares a
+   deliberately forgiving local zod schema (`id`, `label?`, `enabled`, `params`)
+   and ignores any other field the engine writes. Move it into `@pm/core` when
+   the engine's shape settles.
+2. **The params editor is raw JSON.** It validates that the text is a plain
+   object within 8 KB and nothing more — there is no per-strategy schema to
+   validate against, so a typo in a key reaches the backend.
+3. **No mandates UI and no scalp book** — deferred by decision (docs/10 §10.7).
    `VISIBLE_BOOKS` excludes `scalp`.
-5. **No jailbreak/root check and no certificate pinning** (docs/06 §6.7) — both
+4. **No jailbreak/root check and no certificate pinning** (docs/06 §6.7) — both
    are marked Phase 3+ / best-effort in the spec and are not implemented.
-6. **Charges are shown, not computed.** `marketContext.estimatedCharges` comes
+5. **Charges are shown, not computed.** `marketContext.estimatedCharges` comes
    from the strategy engine; the app adds it to (BUY) or subtracts it from
    (SELL) the estimated value and shows the net.

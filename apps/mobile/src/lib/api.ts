@@ -22,6 +22,7 @@ import type {
   OrderRecord,
   OrderStatusCode,
   Position,
+  Quote,
   SessionStatus,
 } from '@pm/core';
 
@@ -356,6 +357,34 @@ export interface KillSwitchPayload {
   enabled: boolean;
 }
 
+export interface ActiveBrokerPayload {
+  activeBroker: Broker;
+}
+
+export interface QuotesPayload {
+  quotes: Quote[];
+}
+
+/** `strategies/{uid}/defs/{id}` as the backend echoes it back. */
+export interface StrategyDef {
+  id: string;
+  enabled: boolean;
+  params?: Record<string, unknown> | undefined;
+  [key: string]: unknown;
+}
+
+export interface StrategyPayload {
+  def: StrategyDef;
+}
+
+export interface StrategyPatch {
+  enabled?: boolean | undefined;
+  params?: Record<string, unknown> | undefined;
+}
+
+/** The backend caps a batch at 20 symbol keys. */
+export const MAX_QUOTE_SYMBOLS = 20;
+
 export interface ExecuteRequest {
   idempotencyKey: string;
   clientSeenLtp: number;
@@ -391,10 +420,15 @@ export interface ApiClient {
   cancelOrder(id: string): Promise<ApiResult<CancelPayload>>;
   order(id: string): Promise<ApiResult<OrderPayload>>;
   setKillSwitch(enabled: boolean, reason?: string): Promise<ApiResult<KillSwitchPayload>>;
+  /** `config.activeBroker` is rules-locked; this route is the only way to move it. */
+  setActiveBroker(broker: Broker): Promise<ApiResult<ActiveBrokerPayload>>;
+  /** Live quotes by `EXCHANGE:SEGMENT:TRADINGSYMBOL`, at most 20 per call. */
+  quotes(symbolKeys: readonly string[]): Promise<ApiResult<QuotesPayload>>;
+  patchStrategy(strategyId: string, patch: StrategyPatch): Promise<ApiResult<StrategyPayload>>;
 }
 
 interface RequestOptions {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PATCH';
   path: string;
   body?: unknown;
   /** `/health` is the only route that must not carry a token. */
@@ -487,9 +521,13 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
       ...(Array.isArray(body['failedChecks'])
         ? { failedChecks: body['failedChecks'] as GuardrailCheck[] }
         : {}),
+      // `/v1/quotes` spells the typed broker failure `kind`; every other route
+      // spells it `brokerErrorKind`. Both land in the same field.
       ...(typeof body['brokerErrorKind'] === 'string'
         ? { brokerErrorKind: body['brokerErrorKind'] as BrokerErrorKind }
-        : {}),
+        : typeof body['kind'] === 'string'
+          ? { brokerErrorKind: body['kind'] as BrokerErrorKind }
+          : {}),
       ...(body['needsLogin'] === true ? { needsLogin: true } : {}),
     });
   }
@@ -533,6 +571,33 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
         method: 'POST',
         path: '/v1/config/killswitch',
         body: { enabled, ...(reason === undefined ? {} : { reason }) },
+      }),
+    setActiveBroker: (broker) =>
+      request<ActiveBrokerPayload>({
+        method: 'POST',
+        path: '/v1/config/active-broker',
+        body: { broker },
+      }),
+    quotes: (symbolKeys) => {
+      // The backend rejects an over-long batch with a 400; truncating here
+      // keeps a caller bug from turning into a refused quote fetch.
+      const keys = symbolKeys.slice(0, MAX_QUOTE_SYMBOLS);
+      const query = new URLSearchParams({ symbols: keys.join(',') }).toString();
+      return request<QuotesPayload>({
+        method: 'GET',
+        path: `/v1/quotes?${query}`,
+        // A quote is worthless once it is stale, so it gets a tight budget.
+        timeoutMs: 6_000,
+      });
+    },
+    patchStrategy: (strategyId, patch) =>
+      request<StrategyPayload>({
+        method: 'PATCH',
+        path: `/v1/strategies/${encodeURIComponent(strategyId)}`,
+        body: {
+          ...(patch.enabled === undefined ? {} : { enabled: patch.enabled }),
+          ...(patch.params === undefined ? {} : { params: patch.params }),
+        },
       }),
   };
 }

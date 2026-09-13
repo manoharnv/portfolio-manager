@@ -1,30 +1,30 @@
 /**
- * The "live" LTP the approval screen collars against.
+ * The live LTP the approval screen collars against — `GET /v1/quotes`.
  *
- * The backend exposes **no quote route** today (see the route table in
- * apps/backend/src/http/app.ts) — the only price the app can legitimately get
- * is the one the backend caches while refreshing the portfolio. So this hook:
+ * Three rules, all of them safety rules (docs/00 §0.7.1, docs/06 §6.6):
  *
- *   1. seeds from `portfolio/{uid}/{holdings,positions}` (Firestore, realtime),
- *   2. polls `GET /v1/portfolio/holdings` + `/positions`, which makes the
- *      backend re-pull from the broker and rewrite that cache,
- *   3. reports the quote's **age**, so a stale price is visibly stale.
+ *   1. **Poll only while the screen is focused.** A backgrounded proposal
+ *      screen must not keep hitting the broker's quote API; `enabled` goes
+ *      false on blur and the interval is torn down.
+ *   2. **A stale quote is not a quote.** Older than `QUOTE_MAX_AGE_SECONDS`
+ *      (30 s, measured against the quote's own `ts`) ⇒ `ltp` is `undefined`,
+ *      which blocks approval. The last value is still exposed as `cachedLtp`
+ *      so the screen can say "₹1,500 (stale)" rather than showing nothing.
+ *   3. **A failed fetch is not a price.** The previous quote keeps ageing out;
+ *      it is never refreshed from a failure.
  *
- * `fresh` is what the gate uses. A price older than `maxAgeSeconds` is not a
- * quote — docs/06 §6.6, "approve gated on a fresh quote", docs/00 §0.7.1.
- *
- * VERIFY-LIVE: if a `GET /v1/quote/:symbolKey` route is ever added, point this
- * at it; the rest of the screen does not change.
+ * Unlike the portfolio-cache version this replaces, a symbol the account does
+ * not already hold quotes fine — a BUY of a new symbol is approvable.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { CanonicalSymbol } from '@pm/core';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CanonicalSymbol, Quote } from '@pm/core';
 import { backend } from '../lib/backend';
-import { isFailure } from '../lib/api';
-import type { HoldingDoc, PositionDoc } from '@pm/core';
+import { describeReason, isFailure } from '../lib/api';
 
-export const QUOTE_POLL_MS = 20_000;
+/** docs/06 §6.3 — "tap within seconds" on the day-trade book. */
+export const QUOTE_POLL_MS = 5_000;
 /** Older than this and the app treats the price as absent. */
-export const QUOTE_MAX_AGE_SECONDS = 120;
+export const QUOTE_MAX_AGE_SECONDS = 30;
 
 export function symbolKeyOf(symbol: CanonicalSymbol): string {
   return `${symbol.exchange}:${symbol.segment}:${symbol.tradingSymbol}`;
@@ -33,98 +33,102 @@ export function symbolKeyOf(symbol: CanonicalSymbol): string {
 export interface LiveQuote {
   /** `undefined` whenever there is no *usable* price — never a stale fallback. */
   ltp: number | undefined;
-  /** The raw cached price even when stale, for the "last seen" label. */
+  /** The last price received, even once stale, for the "last seen" label. */
   cachedLtp: number | undefined;
+  /** The whole quote, for open/high/low context. */
+  quote: Quote | undefined;
   ageSeconds: number | undefined;
   stale: boolean;
   refreshing: boolean;
+  /** Why the last fetch failed, already humanised. */
   error: string | undefined;
   refresh: () => Promise<void>;
 }
 
-/** Picks the newest cached price for a symbol out of the portfolio read model. */
-export function priceFromCache(
-  symbol: CanonicalSymbol,
-  holdings: readonly HoldingDoc[],
-  positions: readonly PositionDoc[],
-): { ltp: number; at: string } | undefined {
-  const key = symbolKeyOf(symbol);
-  const candidates: { ltp: number; at: string }[] = [];
-  for (const h of holdings) {
-    if (h.symbolKey === key && h.lastPrice > 0)
-      candidates.push({ ltp: h.lastPrice, at: h.updatedAt });
-  }
-  for (const p of positions) {
-    if (p.symbolKey === key && p.lastPrice > 0)
-      candidates.push({ ltp: p.lastPrice, at: p.updatedAt });
-  }
-  if (candidates.length === 0) return undefined;
-  return candidates.sort((a, b) => (a.at < b.at ? 1 : -1))[0];
-}
-
 export interface UseLiveQuoteOptions {
-  holdings: readonly HoldingDoc[];
-  positions: readonly PositionDoc[];
   pollMs?: number | undefined;
   maxAgeSeconds?: number | undefined;
-  /** Off for a read-only/expired proposal — no point hammering the broker. */
+  /** False while the screen is blurred, or for a read-only proposal. */
   enabled?: boolean | undefined;
+}
+
+/** Picks the quote for `symbol` out of a batch response. */
+export function matchQuote(symbol: CanonicalSymbol, quotes: readonly Quote[]): Quote | undefined {
+  const key = symbolKeyOf(symbol);
+  return quotes.find((q) => symbolKeyOf(q.symbol) === key && q.ltp > 0);
+}
+
+export function quoteAgeSeconds(quote: Quote, nowMs: number): number | undefined {
+  const at = new Date(quote.ts).getTime();
+  if (Number.isNaN(at)) return undefined;
+  return Math.max(0, (nowMs - at) / 1000);
 }
 
 export function useLiveQuote(
   symbol: CanonicalSymbol | undefined,
-  options: UseLiveQuoteOptions,
+  options: UseLiveQuoteOptions = {},
 ): LiveQuote {
   const pollMs = options.pollMs ?? QUOTE_POLL_MS;
   const maxAge = options.maxAgeSeconds ?? QUOTE_MAX_AGE_SECONDS;
-  const enabled = options.enabled ?? true;
+  const enabled = (options.enabled ?? true) && symbol !== undefined;
 
+  const [quote, setQuote] = useState<Quote | undefined>(undefined);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const [tick, setTick] = useState(() => Date.now());
 
-  const cached = useMemo(
-    () =>
-      symbol === undefined
-        ? undefined
-        : priceFromCache(symbol, options.holdings, options.positions),
-    [symbol, options.holdings, options.positions],
-  );
+  // The key, not the object: a new `{exchange,…}` literal on every render must
+  // not restart the poll.
+  const key = symbol === undefined ? undefined : symbolKeyOf(symbol);
+  const symbolRef = useRef(symbol);
+  symbolRef.current = symbol;
 
   const refresh = useCallback(async () => {
-    if (symbol === undefined) return;
+    const current = symbolRef.current;
+    if (current === undefined) return;
     setRefreshing(true);
-    const [holdings, positions] = await Promise.all([backend().holdings(), backend().positions()]);
-    const failed = isFailure(holdings) && isFailure(positions);
-    setError(failed ? (isFailure(holdings) ? holdings.detail : undefined) : undefined);
+    const result = await backend().quotes([symbolKeyOf(current)]);
     setRefreshing(false);
     setTick(Date.now());
-  }, [symbol]);
+    if (isFailure(result)) {
+      // Leave the previous quote in place — it keeps ageing out on its own.
+      setError(`${describeReason(result.reason).title}: ${result.detail}`);
+      return;
+    }
+    const match = matchQuote(current, result.quotes);
+    setError(match === undefined ? 'the backend returned no quote for this symbol' : undefined);
+    if (match !== undefined) setQuote(match);
+  }, []);
 
   useEffect(() => {
-    if (!enabled || symbol === undefined) return;
+    if (!enabled) return;
     void refresh();
     const poll = setInterval(() => void refresh(), pollMs);
-    // Separate, faster tick so `ageSeconds` counts up between polls.
+    // A separate 1 s tick so `ageSeconds` counts up between polls and a quote
+    // goes stale on screen even if the backend stops answering.
     const age = setInterval(() => setTick(Date.now()), 1000);
     return () => {
       clearInterval(poll);
       clearInterval(age);
     };
-  }, [enabled, symbol, pollMs, refresh]);
+  }, [enabled, key, pollMs, refresh]);
 
-  const ageSeconds = useMemo(() => {
-    if (cached === undefined) return undefined;
-    const at = new Date(cached.at).getTime();
-    if (Number.isNaN(at)) return undefined;
-    return Math.max(0, (tick - at) / 1000);
-  }, [cached, tick]);
+  // A different symbol must never inherit the previous symbol's price.
+  useEffect(() => {
+    setQuote(undefined);
+    setError(undefined);
+  }, [key]);
 
+  const ageSeconds = useMemo(
+    () => (quote === undefined ? undefined : quoteAgeSeconds(quote, tick)),
+    [quote, tick],
+  );
   const stale = ageSeconds === undefined || ageSeconds > maxAge;
 
   return {
-    ltp: stale ? undefined : cached?.ltp,
-    cachedLtp: cached?.ltp,
+    ltp: stale ? undefined : quote?.ltp,
+    cachedLtp: quote?.ltp,
+    quote,
     ageSeconds,
     stale,
     refreshing,

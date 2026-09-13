@@ -5,21 +5,29 @@
  * reject a diff that touches them and the backend re-clamps everything anyway
  * (docs/04 §4.8). Notification preferences live in `users/{uid}.prefs`, one of
  * the two client-owned fields.
+ *
+ * Per-strategy on/off and params go through `PATCH /v1/strategies/:id` —
+ * `strategies/{uid}/defs` is read-only for the client. The master
+ * `tradingEnabled` switch stays above them: it is the one that stops the engine
+ * outright.
  */
 import { useCallback, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useApp } from '../../../src/AppContext';
 import { Banner } from '../../../src/components/Banner';
 import { Money } from '../../../src/components/Money';
+import { useStrategies, type StrategyDef } from '../../../src/hooks/useStrategies';
 import { signOut } from '../../../src/lib/auth';
 import { ROUTES } from '../../../src/lib/deeplink';
 import { istDateTime, pct } from '../../../src/lib/format';
+import { formatParams, parseParams } from '../../../src/lib/strategyParams';
 import { colors, font, radius, space } from '../../../src/theme';
 
 export default function SettingsScreen() {
   const app = useApp();
   const router = useRouter();
+  const strategies = useStrategies(app.uid);
   const [error, setError] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
 
@@ -96,6 +104,36 @@ export default function SettingsScreen() {
         <Row k="Last updated" v={config === undefined ? '—' : istDateTime(config.updatedAt)} />
       </View>
 
+      <View style={styles.card} testID="strategies-card">
+        <Text style={styles.cardTitle}>Strategies</Text>
+        {strategies.error === undefined ? null : (
+          <Banner
+            tone="danger"
+            title="Strategy not updated"
+            message={strategies.error}
+            testID="strategy-error"
+          />
+        )}
+        {strategies.defs.length === 0 ? (
+          <Text style={styles.note} testID="no-strategies">
+            The strategy engine has not registered any routines for this account yet.
+          </Text>
+        ) : (
+          strategies.defs.map((def) => (
+            <StrategyRow
+              key={def.id}
+              def={def}
+              busy={strategies.pending === def.id}
+              onPatch={strategies.patch}
+            />
+          ))
+        )}
+        <Text style={styles.note}>
+          Per-strategy changes go through the backend; `strategies/{'{uid}'}/defs` is read-only for
+          the client. The master switch above stops the engine outright.
+        </Text>
+      </View>
+
       <Pressable
         accessibilityRole="button"
         onPress={() => router.push(ROUTES.guardrails)}
@@ -117,6 +155,102 @@ export default function SettingsScreen() {
         <Text style={styles.signOutText}>Sign out</Text>
       </Pressable>
     </ScrollView>
+  );
+}
+
+/**
+ * One strategy: an optimistic enabled toggle, and a params editor that will not
+ * send anything that is not a plain JSON object within the size cap.
+ */
+function StrategyRow(props: {
+  def: StrategyDef;
+  busy: boolean;
+  onPatch: (
+    id: string,
+    patch: { enabled?: boolean; params?: Record<string, unknown> },
+  ) => Promise<boolean>;
+}) {
+  const { def } = props;
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(() => formatParams(def.params));
+  const [paramsError, setParamsError] = useState<string | undefined>(undefined);
+  const [savedAt, setSavedAt] = useState(false);
+
+  const saveParams = useCallback(async () => {
+    setSavedAt(false);
+    const parsed = parseParams(text);
+    if (!parsed.ok) {
+      setParamsError(parsed.error);
+      return;
+    }
+    setParamsError(undefined);
+    const ok = await props.onPatch(def.id, { params: parsed.value });
+    setSavedAt(ok);
+  }, [text, props, def.id]);
+
+  return (
+    <View style={styles.strategy} testID={`strategy-${def.id}`}>
+      <View style={styles.switchRow}>
+        <View style={styles.switchLabel}>
+          <Text style={styles.k}>{def.label ?? def.id}</Text>
+          <Text style={styles.note}>{def.id}</Text>
+        </View>
+        <Switch
+          accessibilityLabel={`${def.label ?? def.id} enabled`}
+          testID={`strategy-${def.id}-enabled`}
+          value={def.enabled}
+          disabled={props.busy}
+          onValueChange={(next) => void props.onPatch(def.id, { enabled: next })}
+          trackColor={{ true: colors.ok, false: colors.disabled }}
+        />
+      </View>
+
+      <Pressable
+        accessibilityRole="button"
+        onPress={() => setOpen((prev) => !prev)}
+        style={styles.paramsToggle}
+        testID={`strategy-${def.id}-params-toggle`}
+      >
+        <Text style={styles.linkText}>{open ? 'Hide params' : 'Edit params'}</Text>
+      </Pressable>
+
+      {open ? (
+        <View>
+          <TextInput
+            accessibilityLabel={`${def.id} params`}
+            testID={`strategy-${def.id}-params`}
+            multiline
+            autoCapitalize="none"
+            autoCorrect={false}
+            defaultValue={text}
+            onChangeText={setText}
+            placeholder='{"rsiPeriod": 14}'
+            placeholderTextColor={colors.textMuted}
+            style={styles.paramsInput}
+          />
+          {paramsError === undefined ? null : (
+            <Text style={styles.paramsError} testID={`strategy-${def.id}-params-error`}>
+              {paramsError}
+            </Text>
+          )}
+          {savedAt ? (
+            <Text style={styles.paramsSaved} testID={`strategy-${def.id}-params-saved`}>
+              Saved.
+            </Text>
+          ) : null}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ disabled: props.busy }}
+            disabled={props.busy}
+            onPress={() => void saveParams()}
+            style={styles.paramsSave}
+            testID={`strategy-${def.id}-params-save`}
+          >
+            <Text style={styles.linkText}>{props.busy ? 'Saving…' : 'Save params'}</Text>
+          </Pressable>
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -168,6 +302,27 @@ const styles = StyleSheet.create({
     minHeight: font.minTouchTarget,
   },
   linkText: { color: colors.accent, fontSize: font.body, fontWeight: '700' },
+  strategy: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: space.sm,
+    marginTop: space.sm,
+  },
+  paramsToggle: { minHeight: font.minTouchTarget, justifyContent: 'center' },
+  paramsInput: {
+    minHeight: 96,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.sm,
+    padding: space.md,
+    color: colors.text,
+    fontSize: font.small,
+    backgroundColor: colors.surfaceAlt,
+    textAlignVertical: 'top',
+  },
+  paramsError: { color: colors.danger, fontSize: font.small, marginTop: space.xs },
+  paramsSaved: { color: colors.ok, fontSize: font.small, marginTop: space.xs },
+  paramsSave: { minHeight: font.minTouchTarget, justifyContent: 'center' },
   signOut: {
     minHeight: font.minTouchTarget,
     alignItems: 'center',

@@ -101,9 +101,9 @@ made against documented (not live) API shapes.
 | `packages/core` | pure spine: domain types, zod schemas, broker interfaces (read/write split), guardrails + code ceilings, proposal state machine, books / ledger / coordinator / risk manager | 408 |
 | `packages/broker-dhan` | DhanHQ v2 adapter behind an injectable HTTP client | 198 |
 | `packages/broker-kite` | Kite Connect v3 adapter | 192 |
-| `apps/backend` | the static-IP execution service (Fastify): the only process that can place an order | 348+ |
+| `apps/backend` | the static-IP execution service (Fastify): the only process that can place an order | 418 |
 | `apps/strategy` | proposals-only strategy engine, six deterministic strategies across long-term / swing / day-trade; order capability banned by lint + a policy test | 252 |
-| `apps/mobile` | Expo / React Native review-and-approve app | 388+ |
+| `apps/mobile` | Expo / React Native review-and-approve app | 426 |
 | `functions/` | Cloud Functions: pushes, proposal expiry, reminders; plus `firestore.rules` / indexes | 60 |
 | `infra/` | Terraform (validated), VM bootstrap, systemd, Caddy, strategy egress firewall, deploy scripts, CI | — |
 

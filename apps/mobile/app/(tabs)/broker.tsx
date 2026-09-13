@@ -5,12 +5,11 @@
  * broker. The app never holds a broker credential: it asks the backend for a
  * login URL, opens it, and forwards only the short-lived `request_token`.
  *
- * **Switching the active broker is not wired.** `config.activeBroker` is
- * explicitly un-writable by the client (firestore.rules) and the backend
- * exposes no route for it today — the only `/v1/config/*` route is
- * `killswitch` (apps/backend/src/http/app.ts). Rather than invent a contract or
- * write a field the rules will bounce, the control says so plainly. See README
- * "Blocked on the backend".
+ * **Switching the active broker goes through the backend**, never Firestore:
+ * `config.activeBroker` is un-writable by the client (firestore.rules), so
+ * "Make active" calls `POST /v1/config/active-broker`. The backend refuses with
+ * 409 `SESSION_INVALID` when the target broker has no session for today, and
+ * the screen then offers to run that broker's login first.
  */
 import { useCallback, useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -19,17 +18,24 @@ import { useApp } from '../../src/AppContext';
 import { Banner } from '../../src/components/Banner';
 import { mergeBrokerViews } from '../../src/hooks/useBrokerSessions';
 import { backend } from '../../src/lib/backend';
-import { describeReason } from '../../src/lib/api';
+import { describeReason, isFailure } from '../../src/lib/api';
 import { runBrokerLogin } from '../../src/lib/brokerLogin';
 import { istDateTime, istTime } from '../../src/lib/format';
 import { colors, font, radius, space } from '../../src/theme';
 
+interface ScreenMessage {
+  tone: 'ok' | 'danger' | 'warn';
+  title: string;
+  body: string;
+  /** Set on a 409: the broker whose daily login has to happen first. */
+  connectFirst?: Broker | undefined;
+}
+
 export default function BrokerScreen() {
   const app = useApp();
   const [busy, setBusy] = useState<Broker | undefined>(undefined);
-  const [message, setMessage] = useState<
-    { tone: 'ok' | 'danger' | 'warn'; title: string; body: string } | undefined
-  >(undefined);
+  const [switching, setSwitching] = useState<Broker | undefined>(undefined);
+  const [message, setMessage] = useState<ScreenMessage | undefined>(undefined);
 
   const connect = useCallback(
     async (broker: Broker) => {
@@ -63,6 +69,40 @@ export default function BrokerScreen() {
     [app],
   );
 
+  /**
+   * `POST /v1/config/active-broker`. A 409 is not an error to shrug at — it
+   * means the target broker has no session today, so the banner turns into a
+   * "connect first" action rather than a dead end.
+   */
+  const makeActive = useCallback(
+    async (broker: Broker) => {
+      setSwitching(broker);
+      setMessage(undefined);
+      const result = await backend().setActiveBroker(broker);
+      setSwitching(undefined);
+
+      if (!isFailure(result)) {
+        setMessage({
+          tone: 'ok',
+          title: `${result.activeBroker} is now the active broker`,
+          body: 'New proposals and every execution will route through it.',
+        });
+        await app.refreshSession();
+        return;
+      }
+      setMessage({
+        tone: result.reason === 'SESSION_INVALID' ? 'warn' : 'danger',
+        title:
+          result.reason === 'SESSION_INVALID'
+            ? `${broker} is not connected today`
+            : describeReason(result.reason).title,
+        body: result.detail,
+        ...(result.reason === 'SESSION_INVALID' ? { connectFirst: broker } : {}),
+      });
+    },
+    [app],
+  );
+
   const views = mergeBrokerViews(app.brokerDocs, app.session);
 
   return (
@@ -83,6 +123,14 @@ export default function BrokerScreen() {
           tone={message.tone}
           title={message.title}
           message={message.body}
+          actionLabel={
+            message.connectFirst === undefined ? undefined : `Connect ${message.connectFirst} now`
+          }
+          onAction={
+            message.connectFirst === undefined
+              ? undefined
+              : () => void connect(message.connectFirst as Broker)
+          }
           testID="broker-message"
         />
       )}
@@ -146,16 +194,44 @@ export default function BrokerScreen() {
                     : `Re-connect ${view.broker}`}
             </Text>
           </Pressable>
+
+          {view.isActive ? (
+            <Text style={styles.note} testID={`active-note-${view.broker}`}>
+              Already the active broker — every proposal and execution routes through it.
+            </Text>
+          ) : (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ disabled: switching !== undefined || !app.backendReachable }}
+              disabled={switching !== undefined || !app.backendReachable}
+              onPress={() => void makeActive(view.broker)}
+              style={[
+                styles.makeActive,
+                switching !== undefined || !app.backendReachable
+                  ? styles.connectOff
+                  : styles.makeActiveOn,
+              ]}
+              testID={`make-active-${view.broker}`}
+            >
+              <Text style={styles.makeActiveText}>
+                {switching === view.broker
+                  ? 'Switching…'
+                  : !app.backendReachable
+                    ? 'Backend unreachable'
+                    : `Make ${view.broker} active`}
+              </Text>
+            </Pressable>
+          )}
         </View>
       ))}
 
       <View style={styles.card}>
         <Text style={styles.name}>Active broker</Text>
         <Text style={styles.note} testID="switch-broker-note">
-          Switching between Dhan and Kite is not available from the app. `config.activeBroker` is
-          not client-writable (firestore.rules) and the backend exposes no route to change it yet —
-          the only `/v1/config/*` route is the kill switch. Change it on the backend, then pull to
-          refresh here.
+          Switching goes through the backend (`POST /v1/config/active-broker`), never a direct
+          Firestore write — `config.activeBroker` is not client-writable. The target broker must
+          already have a valid session for today; if it does not, the backend refuses and this
+          screen offers to run its daily login first.
         </Text>
       </View>
     </ScrollView>
@@ -224,5 +300,15 @@ const styles = StyleSheet.create({
   connectOn: { borderColor: colors.accent, backgroundColor: colors.surfaceAlt },
   connectOff: { borderColor: colors.disabled, backgroundColor: colors.surface },
   connectText: { color: colors.text, fontSize: font.body, fontWeight: '700' },
+  makeActive: {
+    marginTop: space.sm,
+    minHeight: font.minTouchTarget,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  makeActiveOn: { borderColor: colors.border, backgroundColor: colors.surface },
+  makeActiveText: { color: colors.textMuted, fontSize: font.small, fontWeight: '700' },
   note: { color: colors.textMuted, fontSize: font.small, lineHeight: 19, marginTop: space.xs },
 });

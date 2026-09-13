@@ -14,8 +14,8 @@ import type { AppState } from '../src/AppContext';
 import {
   NOW,
   buildConfig,
-  buildHolding,
   buildProposal,
+  buildQuote,
   buildSessionPayload,
   fakeApiClient,
   isoPlus,
@@ -26,13 +26,16 @@ const fs = () => globalThis.__firestoreMock;
 
 const biometric = LocalAuthentication as jest.Mocked<typeof LocalAuthentication>;
 
-/** A backend whose portfolio refresh succeeds and whose execute is recorded. */
+/**
+ * A backend whose `GET /v1/quotes` returns `quote` (fresh, at the proposal's
+ * limit price, by default) and whose execute is recorded.
+ */
 function backendWith(
   executeProposal: (id: string, body: ExecuteRequest) => Promise<never> | Promise<unknown>,
+  quote: ReturnType<typeof buildQuote> | null = buildQuote(),
 ) {
   return fakeApiClient({
-    holdings: async () => ({ ok: true, at: NOW.toISOString(), holdings: [] }),
-    positions: async () => ({ ok: true, at: NOW.toISOString(), positions: [] }),
+    quotes: async () => ({ ok: true, quotes: quote === null ? [] : [quote] }),
     executeProposal: executeProposal as never,
   });
 }
@@ -44,15 +47,9 @@ const OK_EXECUTE = {
   status: 'SUBMITTED' as const,
 };
 
-/** A fresh, in-collar quote: a holding priced exactly at the proposal's limit. */
-const FRESH_HOLDING = () => buildHolding({ lastPrice: 1500, updatedAt: NOW.toISOString() });
-
 async function renderScreen(state: Partial<AppState> = {}, proposal = buildProposal()) {
-  (globalThis.__routeParams as { current: unknown }).current = { id: proposal.id };
-  const view = await withApp(<ProposalDetailScreen />, {
-    holdings: [FRESH_HOLDING()],
-    ...state,
-  });
+  globalThis.__routeParams.current = { id: proposal.id };
+  const view = await withApp(<ProposalDetailScreen />, state);
   await act(async () => {
     fs().emitDoc(`proposals/${proposal.id}`, proposal);
   });
@@ -100,7 +97,7 @@ describe('rendering the proposal', () => {
 
   it('says so when the proposal does not exist', async () => {
     setBackendForTests(backendWith(async () => OK_EXECUTE));
-    (globalThis.__routeParams as { current: unknown }).current = { id: 'missing' };
+    globalThis.__routeParams.current = { id: 'missing' };
     await withApp(<ProposalDetailScreen />);
     await act(async () => fs().emitDoc('proposals/missing', undefined));
     expect(screen.getByText('Proposal not found')).toBeTruthy();
@@ -108,7 +105,7 @@ describe('rendering the proposal', () => {
 
   it('refuses to render a malformed proposal as approvable', async () => {
     setBackendForTests(backendWith(async () => OK_EXECUTE));
-    (globalThis.__routeParams as { current: unknown }).current = { id: 'p1' };
+    globalThis.__routeParams.current = { id: 'p1' };
     await withApp(<ProposalDetailScreen />);
     await act(async () => fs().emitDoc('proposals/p1', { id: 'p1', junk: true }));
 
@@ -237,6 +234,7 @@ describe('the gate disables approve, visibly', () => {
     name: string;
     state?: Partial<AppState>;
     proposal?: ReturnType<typeof buildProposal>;
+    quote?: ReturnType<typeof buildQuote> | null;
     block: string;
     text: RegExp;
   }[] = [
@@ -268,16 +266,24 @@ describe('the gate disables approve, visibly', () => {
       text: /execution unavailable/,
     },
     {
-      name: 'no live quote',
-      state: { holdings: [] },
+      // The backend answered, but had no quote for this symbol.
+      name: 'no live quote at all',
+      quote: null,
+      block: 'block-NO_QUOTE',
+      text: /no live price/,
+    },
+    {
+      // A quote older than 30 s is not a quote (docs/06 §6.6).
+      name: 'stale quote',
+      quote: buildQuote({ ts: new Date(NOW.getTime() - 45_000).toISOString() }),
       block: 'block-NO_QUOTE',
       text: /no live price/,
     },
   ];
 
-  it.each(cases)('$name', async ({ state, proposal, block, text }) => {
+  it.each(cases)('$name', async ({ state, proposal, quote, block, text }) => {
     const executeProposal = jest.fn(async () => OK_EXECUTE);
-    setBackendForTests(backendWith(executeProposal));
+    setBackendForTests(backendWith(executeProposal, quote === undefined ? buildQuote() : quote));
     await renderScreen(state ?? {}, proposal ?? buildProposal());
 
     const button = screen.getByTestId('approve-button');
@@ -292,11 +298,101 @@ describe('the gate disables approve, visibly', () => {
 
   it('disables approve when the live price is outside the collar', async () => {
     const executeProposal = jest.fn(async () => OK_EXECUTE);
-    setBackendForTests(backendWith(executeProposal));
     // Collar is 1%; a ₹1,700 live price against a ₹1,500 limit is ~11.8% away.
-    await renderScreen({ holdings: [buildHolding({ lastPrice: 1700 })] });
+    setBackendForTests(backendWith(executeProposal, buildQuote({ ltp: 1700 })));
+    await renderScreen();
 
     expect(screen.getByTestId('block-PRICE_OUT_OF_COLLAR')).toHaveTextContent(/refresh/);
+    expect(screen.getByTestId('approve-button').props.accessibilityState.disabled).toBe(true);
+  });
+
+  it('labels a stale quote as stale and says why the price is unusable', async () => {
+    setBackendForTests(
+      backendWith(
+        async () => OK_EXECUTE,
+        buildQuote({ ts: new Date(NOW.getTime() - 45_000).toISOString() }),
+      ),
+    );
+    await renderScreen();
+
+    expect(screen.getByTestId('detail-quote-age')).toHaveTextContent(/stale/);
+    expect(screen.getByTestId('detail-live-ltp')).toHaveTextContent(/stale/);
+  });
+
+  it('surfaces a quote-route failure on the screen', async () => {
+    setBackendForTests(
+      fakeApiClient({
+        quotes: async () => ({
+          ok: false,
+          reason: 'BROKER_ERROR',
+          detail: 'quote feed unavailable',
+          status: 502,
+        }),
+        executeProposal: async () => OK_EXECUTE,
+      }),
+    );
+    await renderScreen();
+
+    expect(screen.getByTestId('detail-quote-error')).toHaveTextContent(/quote feed unavailable/);
+    expect(screen.getByTestId('block-NO_QUOTE')).toBeTruthy();
+  });
+});
+
+// The whole point of moving off the portfolio cache: a BUY of a symbol the
+// account does not hold is now approvable.
+describe('a symbol the account does not hold', () => {
+  const WIPRO = { exchange: 'NSE', segment: 'EQ', tradingSymbol: 'WIPRO' } as const;
+  const unheldProposal = buildProposal({
+    id: 'p-new',
+    order: {
+      symbol: { ...WIPRO },
+      side: 'BUY',
+      quantity: 20,
+      orderType: 'LIMIT',
+      product: 'DELIVERY',
+      validity: 'DAY',
+      limitPrice: 250,
+    },
+    marketContext: {
+      ltpAtProposal: 250,
+      estimatedValueInr: 5000,
+      estimatedCharges: 10,
+      capturedAt: isoPlus(-60),
+    },
+  });
+
+  it('is approvable with a fresh in-collar quote, and no holding anywhere', async () => {
+    const executeProposal = jest.fn(async () => OK_EXECUTE);
+    setBackendForTests(
+      backendWith(executeProposal, buildQuote({ symbol: { ...WIPRO }, ltp: 250 })),
+    );
+    // No holdings and no positions in the shared state at all.
+    await renderScreen({ holdings: [], positions: [] }, unheldProposal);
+
+    expect(screen.queryByTestId('approve-blocks')).toBeNull();
+    expect(screen.getByTestId('approve-button').props.accessibilityState.disabled).toBe(false);
+
+    await approve();
+    expect(executeProposal).toHaveBeenCalledTimes(1);
+    const [, body] = executeProposal.mock.calls[0] as unknown as [string, ExecuteRequest];
+    expect(body.clientSeenLtp).toBe(250);
+  });
+
+  it('is blocked once that quote goes stale', async () => {
+    const executeProposal = jest.fn(async () => OK_EXECUTE);
+    setBackendForTests(
+      backendWith(
+        executeProposal,
+        buildQuote({
+          symbol: { ...WIPRO },
+          ltp: 250,
+          ts: new Date(NOW.getTime() - 45_000).toISOString(),
+        }),
+      ),
+    );
+    await renderScreen({ holdings: [], positions: [] }, unheldProposal);
+
+    expect(screen.getByTestId('block-NO_QUOTE')).toBeTruthy();
     expect(screen.getByTestId('approve-button').props.accessibilityState.disabled).toBe(true);
   });
 });
@@ -420,24 +516,38 @@ describe('reject from the detail screen', () => {
 });
 
 describe('refresh quote', () => {
-  it('re-pulls the portfolio on demand', async () => {
-    const holdings = jest.fn(async () => ({
-      ok: true as const,
-      at: NOW.toISOString(),
-      holdings: [],
-    }));
-    setBackendForTests(
-      fakeApiClient({
-        holdings,
-        positions: async () => ({ ok: true, at: NOW.toISOString(), positions: [] }),
-        executeProposal: async () => OK_EXECUTE,
-      }),
-    );
+  it('re-fetches the quote on demand', async () => {
+    const quotes = jest.fn(async () => ({ ok: true as const, quotes: [buildQuote()] }));
+    setBackendForTests(fakeApiClient({ quotes, executeProposal: async () => OK_EXECUTE }));
     await renderScreen();
-    const before = holdings.mock.calls.length;
+    const before = quotes.mock.calls.length;
 
     await fireEvent.press(screen.getByTestId('refresh-quote'));
     await act(async () => undefined);
-    expect(holdings.mock.calls.length).toBeGreaterThan(before);
+    expect(quotes.mock.calls.length).toBeGreaterThan(before);
+    expect(quotes).toHaveBeenCalledWith(['NSE:EQ:INFY']);
+  });
+
+  it('polls the quote route every 5 s while the screen is focused', async () => {
+    const quotes = jest.fn(async () => ({ ok: true as const, quotes: [buildQuote()] }));
+    setBackendForTests(fakeApiClient({ quotes, executeProposal: async () => OK_EXECUTE }));
+    await renderScreen();
+    const before = quotes.mock.calls.length;
+
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(5_000);
+    });
+    expect(quotes.mock.calls.length).toBe(before + 1);
+  });
+
+  it('does not poll for a read-only proposal', async () => {
+    const quotes = jest.fn(async () => ({ ok: true as const, quotes: [buildQuote()] }));
+    setBackendForTests(fakeApiClient({ quotes, executeProposal: async () => OK_EXECUTE }));
+    await renderScreen({}, buildProposal({ status: 'filled' }));
+
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(20_000);
+    });
+    expect(quotes).not.toHaveBeenCalled();
   });
 });

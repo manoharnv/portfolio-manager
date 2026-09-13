@@ -14,7 +14,7 @@
  */
 import { useCallback, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import type { GuardrailCheck } from '@pm/core';
 import { useApp } from '../../../src/AppContext';
 import { Banner } from '../../../src/components/Banner';
@@ -64,10 +64,18 @@ export default function ProposalDetailScreen() {
   const [placed, setPlaced] = useState<ExecutePayload | undefined>(undefined);
   const [rejectError, setRejectError] = useState<string | undefined>(undefined);
 
+  // Quote polling is scoped to focus: a backgrounded proposal screen must not
+  // keep hitting the broker's quote API (docs/02 §2.x rate limits).
+  const [focused, setFocused] = useState(true);
+  useFocusEffect(
+    useCallback(() => {
+      setFocused(true);
+      return () => setFocused(false);
+    }, []),
+  );
+
   const quote = useLiveQuote(proposal?.order.symbol, {
-    holdings: app.holdings,
-    positions: app.positions,
-    enabled: proposal !== undefined && proposal.status === 'pending',
+    enabled: focused && proposal !== undefined && proposal.status === 'pending',
   });
 
   const gate = useMemo(
@@ -299,10 +307,20 @@ export default function ProposalDetailScreen() {
         </View>
         <View style={styles.metaRow}>
           <Text style={styles.metaKey}>Quote age</Text>
-          <Text style={styles.metaValue}>
-            {quote.ageSeconds === undefined ? '—' : relativeAge(quote.ageSeconds)}
+          <Text
+            style={[styles.metaValue, quote.stale ? styles.bad : undefined]}
+            testID="detail-quote-age"
+          >
+            {quote.ageSeconds === undefined
+              ? 'no quote yet'
+              : `${relativeAge(quote.ageSeconds)}${quote.stale ? ' · stale' : ''}`}
           </Text>
         </View>
+        {quote.error === undefined ? null : (
+          <Text style={styles.quoteError} testID="detail-quote-error">
+            {quote.error}
+          </Text>
+        )}
         <View style={styles.metaRow}>
           <Text style={styles.metaKey}>Est. value</Text>
           <Money amount={marketContext.estimatedValueInr} size={font.small} />
@@ -479,6 +497,7 @@ const styles = StyleSheet.create({
   rationale: { color: colors.text, fontSize: font.body, lineHeight: 22 },
   confidence: { color: colors.textMuted, fontSize: font.small, marginTop: space.sm },
   captured: { color: colors.textMuted, fontSize: font.small, marginTop: space.xs },
+  quoteError: { color: colors.warn, fontSize: font.small, marginTop: space.xs },
   refresh: { marginTop: space.sm, minHeight: font.minTouchTarget, justifyContent: 'center' },
   refreshText: { color: colors.accent, fontSize: font.body, fontWeight: '700' },
   actions: { marginTop: space.sm },

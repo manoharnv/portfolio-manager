@@ -1,5 +1,6 @@
 import {
   EXECUTION_REASONS,
+  MAX_QUOTE_SYMBOLS,
   TRANSPORT_REASONS,
   createApiClient,
   describeReason,
@@ -329,6 +330,155 @@ describe('reason catalogue', () => {
   it('classifies execution reasons', () => {
     expect(isExecutionReason('PRICE_MOVED')).toBe(true);
     expect(isExecutionReason('NETWORK')).toBe(false);
+  });
+});
+
+describe('POST /v1/config/active-broker', () => {
+  it('posts the broker and returns the new active one', async () => {
+    const { client, calls } = harness(() => jsonResponse(200, { ok: true, activeBroker: 'dhan' }));
+    const result = await client.setActiveBroker('dhan');
+
+    expect(result).toEqual({ ok: true, activeBroker: 'dhan' });
+    expect(calls[0]?.url).toBe('https://backend.test/v1/config/active-broker');
+    expect(calls[0]?.init.method).toBe('POST');
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ broker: 'dhan' });
+  });
+
+  it('maps 409 to SESSION_INVALID with needsLogin', async () => {
+    const { client } = harness(() =>
+      jsonResponse(409, {
+        ok: false,
+        reason: 'SESSION_INVALID',
+        detail: 'dhan has no session for today',
+        needsLogin: true,
+      }),
+    );
+    const result = await client.setActiveBroker('dhan');
+
+    expect(isFailure(result) && result.reason).toBe('SESSION_INVALID');
+    expect(isFailure(result) && result.status).toBe(409);
+    expect(isFailure(result) && result.needsLogin).toBe(true);
+  });
+
+  it('maps 400 to INVALID_REQUEST', async () => {
+    const { client } = harness(() =>
+      jsonResponse(400, { ok: false, reason: 'INVALID_REQUEST', detail: 'broker: invalid enum' }),
+    );
+    const result = await client.setActiveBroker('kite');
+    expect(isFailure(result) && result.reason).toBe('INVALID_REQUEST');
+  });
+});
+
+describe('GET /v1/quotes', () => {
+  const quote = {
+    symbol: { exchange: 'NSE', segment: 'EQ', tradingSymbol: 'INFY' },
+    ltp: 1500,
+    open: 1490,
+    high: 1510,
+    low: 1480,
+    close: 1495,
+    volume: 1,
+    ts: '2026-02-03T05:00:00.000Z',
+  };
+
+  it('encodes the symbol keys into the query string', async () => {
+    const { client, calls } = harness(() => jsonResponse(200, { ok: true, quotes: [quote] }));
+    const result = await client.quotes(['NSE:EQ:INFY', 'NSE:EQ:TCS']);
+
+    expect(result).toEqual({ ok: true, quotes: [quote] });
+    expect(calls[0]?.url).toBe(
+      'https://backend.test/v1/quotes?symbols=NSE%3AEQ%3AINFY%2CNSE%3AEQ%3ATCS',
+    );
+    expect(calls[0]?.init.method).toBe('GET');
+    expect(calls[0]?.init.body).toBeUndefined();
+  });
+
+  it('truncates a batch to the backend cap of 20 rather than earning a 400', async () => {
+    const { client, calls } = harness(() => jsonResponse(200, { ok: true, quotes: [] }));
+    const keys = Array.from({ length: 25 }, (_, i) => `NSE:EQ:S${i}`);
+    await client.quotes(keys);
+
+    const sent = new URL(calls[0]!.url).searchParams.get('symbols')!.split(',');
+    expect(sent).toHaveLength(MAX_QUOTE_SYMBOLS);
+    expect(sent[0]).toBe('NSE:EQ:S0');
+  });
+
+  it('maps 409 SESSION_INVALID and 400', async () => {
+    const stale = harness(() =>
+      jsonResponse(409, { ok: false, reason: 'SESSION_INVALID', detail: 'login needed' }),
+    );
+    expect(isFailure(await stale.client.quotes(['NSE:EQ:INFY']))).toBe(true);
+
+    const bad = harness(() =>
+      jsonResponse(400, { ok: false, reason: 'INVALID_REQUEST', detail: 'too many symbols' }),
+    );
+    const result = await bad.client.quotes(['NSE:EQ:INFY']);
+    expect(isFailure(result) && result.reason).toBe('INVALID_REQUEST');
+  });
+
+  // `/v1/quotes` spells the typed broker failure `kind`, not `brokerErrorKind`.
+  it('reads the 502 broker `kind` into brokerErrorKind', async () => {
+    const { client } = harness(() =>
+      jsonResponse(502, {
+        ok: false,
+        reason: 'BROKER_ERROR',
+        detail: 'quote feed down',
+        kind: 'RATE_LIMITED',
+      }),
+    );
+    const result = await client.quotes(['NSE:EQ:INFY']);
+
+    expect(isFailure(result) && result.reason).toBe('BROKER_ERROR');
+    expect(isFailure(result) && result.brokerErrorKind).toBe('RATE_LIMITED');
+  });
+});
+
+describe('PATCH /v1/strategies/:id', () => {
+  it('sends only the fields present in the patch', async () => {
+    const { client, calls } = harness(() =>
+      jsonResponse(200, { ok: true, def: { id: 's1', enabled: false } }),
+    );
+    const result = await client.patchStrategy('s1', { enabled: false });
+
+    expect(result).toEqual({ ok: true, def: { id: 's1', enabled: false } });
+    expect(calls[0]?.init.method).toBe('PATCH');
+    expect(calls[0]?.url).toBe('https://backend.test/v1/strategies/s1');
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ enabled: false });
+  });
+
+  it('sends params alone, and both together', async () => {
+    const { client, calls } = harness(() =>
+      jsonResponse(200, { ok: true, def: { id: 's1', enabled: true } }),
+    );
+    await client.patchStrategy('s1', { params: { rsiPeriod: 21 } });
+    await client.patchStrategy('s1', { enabled: true, params: { rsiPeriod: 21 } });
+
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ params: { rsiPeriod: 21 } });
+    expect(JSON.parse(String(calls[1]?.init.body))).toEqual({
+      enabled: true,
+      params: { rsiPeriod: 21 },
+    });
+  });
+
+  it('percent-encodes the strategy id', async () => {
+    const { client, calls } = harness(() => jsonResponse(200, { ok: true, def: { id: 'a/b' } }));
+    await client.patchStrategy('a/b', { enabled: true });
+    expect(calls[0]?.url).toBe('https://backend.test/v1/strategies/a%2Fb');
+  });
+
+  it('maps 404 and 400', async () => {
+    const missing = harness(() =>
+      jsonResponse(404, { ok: false, reason: 'NOT_FOUND', detail: 'no such strategy' }),
+    );
+    const notFound = await missing.client.patchStrategy('nope', { enabled: true });
+    expect(isFailure(notFound) && notFound.reason).toBe('NOT_FOUND');
+    expect(isFailure(notFound) && notFound.status).toBe(404);
+
+    const bad = harness(() =>
+      jsonResponse(400, { ok: false, reason: 'INVALID_REQUEST', detail: 'params too large' }),
+    );
+    const invalid = await bad.client.patchStrategy('s1', { params: {} });
+    expect(isFailure(invalid) && invalid.reason).toBe('INVALID_REQUEST');
   });
 });
 

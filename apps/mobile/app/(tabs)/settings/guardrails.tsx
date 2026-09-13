@@ -238,10 +238,9 @@ export default function GuardrailsScreen() {
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Strategies</Text>
         <Text style={styles.hint}>
-          Per-strategy on/off and parameters live in `strategies/{'{uid}'}/defs`, which
-          firestore.rules makes read-only for the client and which `@pm/core` does not model yet.
-          Use the strategy-engine config until a backend route exists. The master switch is Settings
-          → Trading.
+          Per-strategy on/off and parameters are on the Settings screen. They go through `PATCH
+          /v1/strategies/:id`, because `strategies/{'{uid}'}/defs` is read-only for the client. The
+          master switch is Settings → Trading.
         </Text>
       </View>
     </ScrollView>

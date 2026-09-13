@@ -17,9 +17,11 @@ import type {
   OrderRecord,
   PositionDoc,
   Proposal,
+  Quote,
 } from '@pm/core';
 import { AppContext, emptyAppState, type AppState } from './AppContext';
 import type { ApiClient, SessionPayload } from './lib/api';
+import type { StrategyDef } from './hooks/useStrategies';
 
 /** A fixed instant, deep inside NSE hours on a Tuesday. */
 export const NOW = new Date('2026-02-03T05:00:00.000Z'); // 10:30 IST
@@ -234,6 +236,31 @@ export function buildOrder(overrides: Partial<OrderRecord> = {}): OrderRecord {
   };
 }
 
+/** A live quote as `GET /v1/quotes` returns it. Fresh at `NOW` by default. */
+export function buildQuote(overrides: Partial<Quote> = {}): Quote {
+  return {
+    symbol: { ...SYMBOL },
+    ltp: 1500,
+    open: 1490,
+    high: 1510,
+    low: 1480,
+    close: 1495,
+    volume: 120_000,
+    ts: NOW_ISO,
+    ...overrides,
+  };
+}
+
+export function buildStrategyDef(overrides: Partial<StrategyDef> = {}): StrategyDef {
+  return {
+    id: 'mean-reversion-v1',
+    label: 'Mean reversion',
+    enabled: true,
+    params: { rsiPeriod: 14 },
+    ...overrides,
+  };
+}
+
 export function buildAuditEvent(overrides: Partial<AuditEvent> = {}): AuditEvent {
   return {
     id: 'a1',
@@ -264,6 +291,9 @@ export function fakeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
     cancelOrder: unexpected('cancelOrder'),
     order: unexpected('order'),
     setKillSwitch: unexpected('setKillSwitch'),
+    setActiveBroker: unexpected('setActiveBroker'),
+    quotes: unexpected('quotes'),
+    patchStrategy: unexpected('patchStrategy'),
     ...overrides,
   } as ApiClient;
 }

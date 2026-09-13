@@ -277,7 +277,9 @@ jest.mock('expo-router', () => {
     useLocalSearchParams: () => params.current,
     useSegments: () => [],
     usePathname: () => '/',
-    useFocusEffect: jest.fn(),
+    // A mounted screen under the test renderer is a focused screen: run the
+    // effect and its cleanup exactly as react-navigation would.
+    useFocusEffect: (callback) => React.useEffect(callback, [callback]),
     Link: passthrough,
     Redirect: () => null,
     Stack,
