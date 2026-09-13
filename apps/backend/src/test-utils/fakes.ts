@@ -57,6 +57,8 @@ import type {
   SecretStore,
   SecretValue,
   SessionStore,
+  StrategyDef,
+  StrategyDefsRepo,
   TokenVerifier,
 } from '../ports/index.js';
 import { makeFunds, makeInstrument, makeQuote, makeSessionStatus } from './fixtures.js';
@@ -355,6 +357,28 @@ export class FakeLedgerRepo implements LedgerRepo {
 
   list(uid: string): Promise<LedgerEntry[]> {
     return Promise.resolve([...this.docs.values()].filter((e) => e.uid === uid));
+  }
+}
+
+export class FakeStrategyDefsRepo implements StrategyDefsRepo {
+  readonly docs = new Map<string, StrategyDef>();
+
+  constructor(seed: { uid: string; strategyId: string; def: StrategyDef }[] = []) {
+    for (const s of seed) this.docs.set(`${s.uid}:${s.strategyId}`, s.def);
+  }
+
+  get(uid: string, strategyId: string): Promise<StrategyDef | undefined> {
+    const def = this.docs.get(`${uid}:${strategyId}`);
+    return Promise.resolve(def === undefined ? undefined : { ...def });
+  }
+
+  patch(uid: string, strategyId: string, patch: StrategyDef): Promise<StrategyDef> {
+    const key = `${uid}:${strategyId}`;
+    const current = this.docs.get(key);
+    if (current === undefined) return Promise.reject(new Error(`no strategy def '${key}'`));
+    const next = { ...current, ...patch };
+    this.docs.set(key, next);
+    return Promise.resolve(next);
   }
 }
 

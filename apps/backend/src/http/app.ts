@@ -28,6 +28,9 @@ import type { KillSwitchService } from '../services/killswitch.js';
 import type { SessionService } from '../services/session.js';
 import type { PortfolioService } from '../services/portfolio.js';
 import type { ReconcileService } from '../services/reconcile.js';
+import type { ActiveBrokerService } from '../services/active-broker.js';
+import type { QuotesService } from '../services/quotes.js';
+import type { StrategiesService } from '../services/strategies.js';
 import { brokerErrorStatus, executionOutcome, failureBody, simpleStatus } from './mapping.js';
 
 declare module 'fastify' {
@@ -45,6 +48,9 @@ export interface Services {
   session: SessionService;
   portfolio: PortfolioService;
   reconcile: ReconcileService;
+  activeBroker: ActiveBrokerService;
+  quotes: QuotesService;
+  strategies: StrategiesService;
 }
 
 export interface AppDeps {
@@ -67,6 +73,10 @@ const ExecuteBodySchema = z.object({
   clientSeenLtp: z.number().positive().finite(),
   biometricAssertion: z.string().min(1).optional(),
 });
+
+const StrategyParamSchema = z.object({ strategyId: z.string().min(1) });
+const ActiveBrokerBodySchema = z.object({ broker: z.enum(['dhan', 'kite']) });
+const QuotesQuerySchema = z.object({ symbols: z.string().min(1) });
 
 const RejectBodySchema = z.object({ reason: z.string().min(1).max(500).optional() });
 const KillSwitchBodySchema = z.object({
@@ -315,6 +325,60 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       uid: uidOf(request),
       enabled: body.data.enabled,
       ...(body.data.reason === undefined ? {} : { reason: body.data.reason }),
+    });
+    if (!result.ok) {
+      return reply
+        .code(simpleStatus(result.reason))
+        .send(failureBody(result.reason, result.detail));
+    }
+    return result;
+  });
+
+  /**
+   * The broker switch (docs/02 §2.4, docs/06 §6.3). The client cannot write
+   * `config.activeBroker` itself — the rules forbid it — because the switch is
+   * only safe once the target broker has a live session.
+   */
+  app.post('/v1/config/active-broker', async (request, reply) => {
+    const body = ActiveBrokerBodySchema.safeParse(request.body ?? {});
+    if (!body.success) return badRequest(reply, body.error);
+    const result = await deps.services.activeBroker.setActiveBroker({
+      uid: uidOf(request),
+      broker: body.data.broker,
+    });
+    if (!result.ok) {
+      return reply
+        .code(simpleStatus(result.reason))
+        .send(failureBody(result.reason, result.detail));
+    }
+    return result;
+  });
+
+  /** Live quotes for arbitrary symbols — the approval screen's staleness check. */
+  app.get('/v1/quotes', async (request, reply) => {
+    const query = QuotesQuerySchema.safeParse(request.query ?? {});
+    if (!query.success) return badRequest(reply, query.error);
+
+    const result = await deps.services.quotes.getQuotes(uidOf(request), query.data.symbols);
+    if (!result.ok) {
+      return reply.code(simpleStatus(result.reason)).send(
+        failureBody(result.reason, result.detail, {
+          // Contract note: this route reports the broker error kind as `kind`.
+          ...(result.reason === 'BROKER_ERROR' ? { kind: result.kind } : {}),
+        }),
+      );
+    }
+    return { ok: true, quotes: result.quotes };
+  });
+
+  app.patch('/v1/strategies/:strategyId', async (request, reply) => {
+    const params = StrategyParamSchema.safeParse(request.params);
+    if (!params.success) return badRequest(reply, params.error);
+
+    const result = await deps.services.strategies.patchStrategy({
+      uid: uidOf(request),
+      strategyId: params.data.strategyId,
+      patch: request.body,
     });
     if (!result.ok) {
       return reply

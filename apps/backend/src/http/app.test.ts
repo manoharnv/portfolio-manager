@@ -14,7 +14,12 @@ import { BrokerError } from '@pm/core';
 import { silentLogger } from '../logger.js';
 import { buildApp, sanitizeOrder, type AppDeps, type Services } from './app.js';
 import { FakeTokenVerifier, FixedClock } from '../test-utils/fakes.js';
-import { MARKET_OPEN_NOW, makeBackendConfig, makeOrderRecord } from '../test-utils/fixtures.js';
+import {
+  MARKET_OPEN_NOW,
+  makeBackendConfig,
+  makeOrderRecord,
+  makeQuote,
+} from '../test-utils/fixtures.js';
 import type { ExecutionResult } from '../services/execution.js';
 import type { RejectResult } from '../services/reject.js';
 import type { CancelResult } from '../services/cancel.js';
@@ -26,6 +31,9 @@ import type {
 } from '../services/session.js';
 import type { PortfolioResult } from '../services/portfolio.js';
 import type { SyncResult } from '../services/reconcile.js';
+import type { SetActiveBrokerResult } from '../services/active-broker.js';
+import type { QuotesResult } from '../services/quotes.js';
+import type { PatchStrategyResult } from '../services/strategies.js';
 
 const AUTH = { authorization: 'Bearer token-u1' };
 
@@ -39,9 +47,14 @@ interface Stubs {
   completeLogin: CompleteLoginResult;
   portfolio: PortfolioResult;
   sync: SyncResult;
+  activeBroker: SetActiveBrokerResult;
+  quotes: QuotesResult;
+  strategy: PatchStrategyResult;
   /** When set, every execute call throws it — exercises the error handler. */
   executionThrows?: Error | undefined;
   executeCalls: unknown[];
+  quotesCalls: string[];
+  strategyCalls: unknown[];
 }
 
 function stubs(): Stubs {
@@ -86,7 +99,12 @@ function stubs(): Stubs {
       },
     },
     sync: { ok: true, order: makeOrderRecord(), changed: false },
+    activeBroker: { ok: true, activeBroker: 'kite' },
+    quotes: { ok: true, quotes: [makeQuote({ ltp: 2951 })] },
+    strategy: { ok: true, def: { id: 'momentum-v1', enabled: false } },
     executeCalls: [],
+    quotesCalls: [],
+    strategyCalls: [],
   };
 }
 
@@ -111,6 +129,19 @@ function servicesFrom(s: Stubs): Services {
     reconcile: {
       reconcileUser: () => Promise.resolve({ checked: 0, updated: 0, errors: 0, stuck: 0 }),
       syncOrder: () => Promise.resolve(s.sync),
+    },
+    activeBroker: { setActiveBroker: () => Promise.resolve(s.activeBroker) },
+    quotes: {
+      getQuotes: (_uid, symbols) => {
+        s.quotesCalls.push(symbols);
+        return Promise.resolve(s.quotes);
+      },
+    },
+    strategies: {
+      patchStrategy: (input) => {
+        s.strategyCalls.push(input);
+        return Promise.resolve(s.strategy);
+      },
     },
   };
 }
@@ -190,6 +221,29 @@ describe('authentication', () => {
 
     expect(res.statusCode).toBe(403);
     await closed.close();
+  });
+
+  it.each([
+    ['POST', '/v1/config/active-broker'],
+    ['GET', '/v1/quotes?symbols=NSE:EQ:RELIANCE'],
+    ['PATCH', '/v1/strategies/momentum-v1'],
+  ] as const)('requires a token on %s %s', async (method, url) => {
+    const res = await app.inject({ method, url, payload: {} });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it.each([
+    ['POST', '/v1/config/active-broker'],
+    ['GET', '/v1/quotes?symbols=NSE:EQ:RELIANCE'],
+    ['PATCH', '/v1/strategies/momentum-v1'],
+  ] as const)('forbids a non-allowlisted uid on %s %s', async (method, url) => {
+    const res = await app.inject({
+      method,
+      url,
+      headers: { authorization: 'Bearer token-stranger' },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(403);
   });
 
   it('answers 404 with a clean body for an unknown route', async () => {
@@ -542,6 +596,170 @@ describe('the other routes', () => {
     expect(res.statusCode).toBe(404);
   });
 
+  it('POST /v1/config/active-broker switches and echoes the new broker', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/config/active-broker',
+      headers: AUTH,
+      payload: { broker: 'kite' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, activeBroker: 'kite' });
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['missing broker', {}],
+    ['unknown broker', { broker: 'etrade' }],
+    ['wrong case', { broker: 'DHAN' }],
+    ['non-string broker', { broker: 1 }],
+  ])('rejects a bad active-broker body: %s', async (_label, payload) => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/config/active-broker',
+      headers: AUTH,
+      payload,
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ ok: false, reason: 'INVALID_REQUEST' });
+  });
+
+  it('maps an unusable target session to 409 with needsLogin', async () => {
+    s.activeBroker = {
+      ok: false,
+      reason: 'SESSION_INVALID',
+      detail: "cannot switch to 'kite': not connected",
+    };
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/config/active-broker',
+      headers: AUTH,
+      payload: { broker: 'kite' },
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ reason: 'SESSION_INVALID', needsLogin: true });
+  });
+
+  it('maps a missing config on the broker switch to 404', async () => {
+    s.activeBroker = { ok: false, reason: 'NOT_FOUND', detail: 'no config' };
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/config/active-broker',
+      headers: AUTH,
+      payload: { broker: 'kite' },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('GET /v1/quotes returns core-shaped quotes and forwards the raw parameter', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/quotes?symbols=NSE%3AEQ%3ARELIANCE%2CNSE%3AEQ%3AINFY',
+      headers: AUTH,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true });
+    expect(res.json().quotes[0]).toMatchObject({
+      symbol: { exchange: 'NSE', segment: 'EQ', tradingSymbol: 'RELIANCE' },
+      ltp: 2951,
+      ts: MARKET_OPEN_NOW,
+    });
+    expect(s.quotesCalls).toEqual(['NSE:EQ:RELIANCE,NSE:EQ:INFY']);
+  });
+
+  it('rejects /v1/quotes with no symbols parameter', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v1/quotes', headers: AUTH });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ ok: false, reason: 'INVALID_REQUEST' });
+    expect(s.quotesCalls).toHaveLength(0);
+  });
+
+  it('maps a malformed or oversized symbol list to 400', async () => {
+    s.quotes = { ok: false, reason: 'INVALID_PAYLOAD', detail: 'at most 20 per call' };
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/quotes?symbols=nse:eq:reliance',
+      headers: AUTH,
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ reason: 'INVALID_PAYLOAD' });
+  });
+
+  it('maps a quotes session failure to 409', async () => {
+    s.quotes = { ok: false, reason: 'SESSION_INVALID', detail: 'no token' };
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/quotes?symbols=NSE:EQ:RELIANCE',
+      headers: AUTH,
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().needsLogin).toBe(true);
+  });
+
+  it('maps a quotes broker failure to 502 reporting the kind', async () => {
+    s.quotes = {
+      ok: false,
+      reason: 'BROKER_ERROR',
+      detail: 'slow down',
+      kind: 'RATE_LIMITED',
+    };
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/quotes?symbols=NSE:EQ:RELIANCE',
+      headers: AUTH,
+    });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toMatchObject({ ok: false, reason: 'BROKER_ERROR', kind: 'RATE_LIMITED' });
+  });
+
+  it('PATCH /v1/strategies/:id returns the merged def and passes the body through', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/strategies/momentum-v1',
+      headers: AUTH,
+      payload: { enabled: false, params: { dma: 50 } },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, def: { id: 'momentum-v1', enabled: false } });
+    expect(s.strategyCalls[0]).toEqual({
+      uid: 'u1',
+      strategyId: 'momentum-v1',
+      patch: { enabled: false, params: { dma: 50 } },
+    });
+  });
+
+  it('maps an unknown strategy to 404', async () => {
+    s.strategy = { ok: false, reason: 'NOT_FOUND', detail: 'does not exist' };
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/strategies/nope',
+      headers: AUTH,
+      payload: { enabled: true },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('maps an invalid strategy patch to 400', async () => {
+    s.strategy = { ok: false, reason: 'INVALID_PAYLOAD', detail: 'supply at least one field' };
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/strategies/momentum-v1',
+      headers: AUTH,
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ reason: 'INVALID_PAYLOAD' });
+  });
+
   it('POST /v1/admin/whitelist-ip answers 501 with a clear message', async () => {
     const res = await app.inject({
       method: 'POST',
@@ -574,6 +792,17 @@ describe('rate limiting', () => {
     expect(codes).toEqual([200, 200, 429]);
     const last = await limited.inject({ method: 'GET', url: '/v1/session', headers: AUTH });
     expect(last.json()).toMatchObject({ ok: false, reason: 'RATE_LIMITED' });
+    await limited.close();
+  });
+
+  it('applies the same per-uid budget to the quotes route', async () => {
+    const limited = await build({
+      config: makeBackendConfig({ rateLimit: { max: 1, windowMs: 60_000 } }),
+    });
+    const url = '/v1/quotes?symbols=NSE:EQ:RELIANCE';
+
+    expect((await limited.inject({ method: 'GET', url, headers: AUTH })).statusCode).toBe(200);
+    expect((await limited.inject({ method: 'GET', url, headers: AUTH })).statusCode).toBe(429);
     await limited.close();
   });
 

@@ -17,6 +17,7 @@ import {
   createPortfolioCache,
   createProposalRepo,
   createSessionStore,
+  createStrategyDefsRepo,
 } from './repos.js';
 import { DocumentShapeError } from './mappers.js';
 import { FakeFirestore } from '../../test-utils/fake-firestore.js';
@@ -297,6 +298,41 @@ describe('ledger repo', () => {
     await repo.remove('u1', 'led_1');
     expect(await repo.list('u1')).toHaveLength(0);
     expect(db.deletes).toEqual(['ledger/u1/entries/led_1']);
+  });
+});
+
+describe('strategy defs repo', () => {
+  it('reads a def from strategies/{uid}/defs/{id}', async () => {
+    db.seed('strategies/u1/defs/momentum-v1', { id: 'momentum-v1', enabled: true });
+    expect(await createStrategyDefsRepo(db).get('u1', 'momentum-v1')).toEqual({
+      id: 'momentum-v1',
+      enabled: true,
+    });
+  });
+
+  it('returns undefined for a def that does not exist', async () => {
+    expect(await createStrategyDefsRepo(db).get('u1', 'nope')).toBeUndefined();
+  });
+
+  it('merge-patches and returns the merged document', async () => {
+    db.seed('strategies/u1/defs/momentum-v1', {
+      id: 'momentum-v1',
+      enabled: true,
+      params: { dma: 20 },
+    });
+
+    const merged = await createStrategyDefsRepo(db).patch('u1', 'momentum-v1', {
+      enabled: false,
+    });
+    expect(merged).toEqual({ id: 'momentum-v1', enabled: false, params: { dma: 20 } });
+    expect(db.writes.at(-1)).toEqual({ path: 'strategies/u1/defs/momentum-v1', merge: true });
+  });
+
+  it('refuses to create a def it was only asked to patch', async () => {
+    await expect(createStrategyDefsRepo(db).patch('u1', 'gone', { enabled: true })).rejects.toThrow(
+      /refusing to create/,
+    );
+    expect(db.docs.has('strategies/u1/defs/gone')).toBe(false);
   });
 });
 

@@ -89,6 +89,11 @@ export function bookPath(uid: string, bookId: string): string {
   return `books/${uid}/books/${bookId}`;
 }
 
+/** `strategies/{uid}/defs/{strategyId}` (docs/03 §3.1). */
+export function strategyDefPath(uid: string, strategyId: string): string {
+  return `strategies/${uid}/defs/${strategyId}`;
+}
+
 export function ledgerCollection(uid: string): string {
   return `ledger/${uid}/entries`;
 }

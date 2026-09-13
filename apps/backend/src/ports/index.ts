@@ -162,6 +162,22 @@ export interface LedgerRepo {
   list(uid: string): Promise<LedgerEntry[]>;
 }
 
+/**
+ * `strategies/{uid}/defs/{strategyId}` (docs/03 §3.1).
+ *
+ * Deliberately untyped beyond "a JSON document": `@pm/core` defines no schema
+ * for a strategy definition, and the strategy engine validates its own params at
+ * run time. The backend's job is to store what the app sends, not to have an
+ * opinion about a strategy it does not run.
+ */
+export type StrategyDef = Record<string, unknown>;
+
+export interface StrategyDefsRepo {
+  get(uid: string, strategyId: string): Promise<StrategyDef | undefined>;
+  /** Merge-patch. Never creates: defs are provisioned by the operator. */
+  patch(uid: string, strategyId: string, patch: StrategyDef): Promise<StrategyDef>;
+}
+
 export interface BookRepo {
   get(uid: string, bookId: BookId): Promise<Book | undefined>;
   patch(uid: string, bookId: BookId, patch: Partial<Book>): Promise<void>;

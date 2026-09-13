@@ -38,11 +38,15 @@ import {
   createPortfolioCache,
   createProposalRepo,
   createSessionStore,
+  createStrategyDefsRepo,
 } from './adapters/firestore/repos.js';
 import type { FsDb, FsDocRef } from './adapters/firestore/db.js';
 import { buildApp } from './http/app.js';
+import { createActiveBrokerService } from './services/active-broker.js';
 import { createAuditWriter } from './services/audit.js';
 import { createBrokerGateway } from './services/broker-gateway.js';
+import { createQuotesService } from './services/quotes.js';
+import { createStrategiesService } from './services/strategies.js';
 import { createCancelService } from './services/cancel.js';
 import { createDailyAggregates } from './services/daily-aggregates.js';
 import { createExecutionService } from './services/execution.js';
@@ -131,6 +135,7 @@ async function main(): Promise<void> {
   const portfolioCache = createPortfolioCache(db);
   const ledger = createLedgerRepo(db);
   const books = createBookRepo(db);
+  const strategyDefs = createStrategyDefsRepo(db);
   const secrets = createSecretManagerStore({
     projectId: config.gcpProject === '' ? config.firebaseProjectId : config.gcpProject,
   });
@@ -192,6 +197,9 @@ async function main(): Promise<void> {
       reject: createRejectService({ proposals, audit, clock }),
       cancel: createCancelService({ orders, broker, audit, clock }),
       killswitch: createKillSwitchService({ configs, audit, clock }),
+      activeBroker: createActiveBrokerService({ configs, sessions, audit, clock }),
+      quotes: createQuotesService({ broker }),
+      strategies: createStrategiesService({ defs: strategyDefs, audit }),
       session: createSessionService({
         secrets,
         sessions,

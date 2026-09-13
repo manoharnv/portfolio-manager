@@ -45,6 +45,8 @@ import type {
   ProposalTransitionPatch,
   ProposalTransitionResult,
   SessionStore,
+  StrategyDef,
+  StrategyDefsRepo,
 } from '../../ports/index.js';
 import { stripUndefined, type FsDb } from './db.js';
 import {
@@ -56,6 +58,7 @@ import {
   portfolioCollection,
   portfolioDocId,
   sessionPath,
+  strategyDefPath,
 } from './mappers.js';
 
 const OPEN_ORDER_STATUSES = ['SUBMITTED', 'OPEN', 'PARTIAL', 'UNKNOWN'];
@@ -326,6 +329,38 @@ export function createLedgerRepo(db: FsDb): LedgerRepo {
     async list(uid: string): Promise<LedgerEntry[]> {
       const snap = await db.collection(ledgerCollection(uid)).get();
       return decodeAll('ledger', snap.docs, LedgerEntrySchema);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// strategies/{uid}/defs/{strategyId}
+// ---------------------------------------------------------------------------
+
+export function createStrategyDefsRepo(db: FsDb): StrategyDefsRepo {
+  const ref = (uid: string, id: string): ReturnType<FsDb['doc']> =>
+    db.doc(strategyDefPath(uid, id));
+
+  return {
+    async get(uid: string, strategyId: string): Promise<StrategyDef | undefined> {
+      const snap = await ref(uid, strategyId).get();
+      return snap.exists ? snap.data() : undefined;
+    },
+
+    /**
+     * Merge-patch, never create. A merge-write onto a missing document would
+     * conjure a strategy definition out of a partial patch — defs are
+     * provisioned by the operator, so an absent one stays absent.
+     */
+    async patch(uid: string, strategyId: string, patch: StrategyDef): Promise<StrategyDef> {
+      const path = strategyDefPath(uid, strategyId);
+      if (!(await ref(uid, strategyId).get()).exists) {
+        throw new Error(`${path} does not exist — refusing to create`);
+      }
+      await ref(uid, strategyId).set(asData(patch), { merge: true });
+      const data = (await ref(uid, strategyId).get()).data();
+      if (data === undefined) throw new Error(`${path} disappeared during patch`);
+      return data;
     },
   };
 }

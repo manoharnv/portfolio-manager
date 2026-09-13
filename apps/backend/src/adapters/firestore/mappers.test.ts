@@ -11,6 +11,7 @@ import {
   portfolioCollection,
   portfolioDocId,
   sessionPath,
+  strategyDefPath,
 } from './mappers.js';
 import type { FsDocSnapshot } from './db.js';
 import { stripUndefined } from './db.js';
@@ -68,6 +69,7 @@ describe('document paths', () => {
     expect(ledgerCollection('u1')).toBe('ledger/u1/entries');
     expect(portfolioCollection('u1', 'holdings')).toBe('portfolio/u1/holdings');
     expect(fundsPath('u1')).toBe('portfolio/u1/funds/current');
+    expect(strategyDefPath('u1', 'momentum-v1')).toBe('strategies/u1/defs/momentum-v1');
   });
 
   it('derives a stable portfolio doc id from the symbol', () => {
