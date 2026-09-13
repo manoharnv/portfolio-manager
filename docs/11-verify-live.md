@@ -72,7 +72,19 @@ Run `grep -rn "VERIFY-LIVE" packages/` to find the exact lines.
 | 5 | 2nd-gen trigger payload shapes (`FirestoreEvent`, `Change<QueryDocumentSnapshot>`) confirmed from `firebase-functions@6` typings, not an emulator run. | `index.ts` | 🟡 Handlers receive unexpected shapes. |
 | 6 | TTL policies are **not** deployable from `firestore.indexes.json` — set via `gcloud firestore fields ttls update` for `proposals.ttlExpiresAt` and `idempotency.createdAt` (see `functions/README.md`). | infra | 🟡 Expired docs accumulate (functional impact nil: the sweep flips status first). |
 
-## 11.4 How to run the verification (Phase 1)
+## 11.4 Strategy engine — `apps/strategy`
+
+| # | Assumption to verify | Where | Risk if wrong |
+|---|---|---|---|
+| 1 | **Exchange holiday list is empty by default.** `PM_HOLIDAYS` (engine) and the backend's `marketHolidays` must be populated with the NSE calendar, else holidays are treated as trading days (ticks fire; proposals expire unusable). | `index.ts`, `schedule.ts` | 🟠 Noise + wasted proposals on holidays. |
+| 2 | Composite indexes for the engine's queries — `auditLog (uid, type, ts)` and `proposals (uid, status)` — are now in `firestore.indexes.json`; confirm they deploy and the queries use them. | `adapters/firestore/repos.ts` | 🟠 Ticks fail on FAILED_PRECONDITION. |
+| 3 | **Service-account scoping is not enforceable by Firestore IAM** (no per-collection conditions). The engine's "proposals + auditLog only" write set is enforced by code, lint and `policy.test.ts`, not by IAM. Infra must still give the engine SA the least role (`roles/datastore.user`) and **no** Secret Manager access to order/token secrets. | infra | 🟡 Defence-in-depth relies on the code layers. |
+| 4 | `FirestoreLike` is a structural slice of `firebase-admin@13`'s `Firestore`; re-verify on SDK upgrades. | `adapters/firestore/types.ts` | 🟡 Compile break on upgrade. |
+| 5 | Required env: `PM_UID`, `PM_BROKER_SECRET` (Secret Manager name of the READ creds JSON), `PM_INSTRUMENTS_URL`; `main()` throws without them (fail closed). | `index.ts` | 🟡 Engine won't start. |
+| 6 | **Tick placement deviates from docs/05 §5.5 on purpose:** price-taking strategies (DCA, rebalance) run on `intraday` ticks, not pre-open/eod, because a proposal drafted at 09:00 or 15:45 IST can never pass the `marketHours` guardrail and would expire unusable. `StrategyDef.ticks` lets an operator override. | `strategies/*` | — (design note) |
+| 7 | Risk limits are derived defaults (portfolio daily-loss stop = Σ book stops; gross exposure = capital × (100 − reserve)%; concentration 25%) overridable via `HarnessDeps.riskLimits` — `Config` has no `RiskLimits` block yet; promote into core `Config` in a later pass. | `harness.ts` | 🟡 Limits not operator-editable from the app. |
+
+## 11.5 How to run the verification (Phase 1)
 
 1. Use a **read-only day**: no order APIs are exercised until §11.1 items 1–9 are green.
 2. Load the live scrip master → assert a handful of known instruments (RELIANCE NSE_EQ,
