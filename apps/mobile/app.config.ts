@@ -45,6 +45,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ios: {
     supportsTablet: false,
     bundleIdentifier: IOS_BUNDLE_ID,
+    // Lets `expo run:ios --device …` sign without an Xcode round-trip.
+    ...(env('EXPO_PUBLIC_APPLE_TEAM_ID') ? { appleTeamId: env('EXPO_PUBLIC_APPLE_TEAM_ID') } : {}),
     usesAppleSignIn: true,
     // The operator drops the file here; it is gitignored (see README).
     googleServicesFile: './GoogleService-Info.plist',
@@ -73,6 +75,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     // it only toggles APNs/auto-init flags and messaging works without it; see
     // README "Firebase split" before adding it.
     '@react-native-firebase/app',
+    // Applies the RNFB LIGHT-stack Podfile lines on every prebuild (README §3).
+    './plugins/with-firebase-modular-headers',
     'expo-local-authentication',
     'expo-secure-store',
     'expo-apple-authentication',

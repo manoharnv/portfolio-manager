@@ -100,14 +100,17 @@ pnpm --filter @pm/mobile clean
 > **Never run `expo prebuild --clean`** on a tree that already has hand-managed
 > native files — it wipes signing config and the Google service files.
 
-### The iOS Podfile: three modular-header lines
+### The iOS Podfile: three modular-header lines (applied automatically)
 
-After the first prebuild, edit `ios/Podfile` by hand and add these immediately
-after `use_expo_modules!` inside the app target:
+The config plugin `plugins/with-firebase-modular-headers.js` (registered in
+`app.config.ts`) inserts these three lines immediately after `use_expo_modules!`
+on **every** prebuild, idempotently — so a regenerated `ios/` never loses them.
+The result looks like:
 
 ```ruby
-target 'YourApp' do
+target 'PortfolioManager' do
   use_expo_modules!
+  # @pm/mobile: RNFB LIGHT-stack modular headers (with-firebase-modular-headers.js)
   pod 'GoogleUtilities', :modular_headers => true
   pod 'FirebaseCore', :modular_headers => true
   pod 'FirebaseCoreInternal', :modular_headers => true
@@ -116,7 +119,10 @@ target 'YourApp' do
 end
 ```
 
-Then `cd ios && LANG=en_US.UTF-8 pod install`.
+`npx expo run:ios` runs `pod install` itself. If you prebuild separately, run
+`cd ios && LANG=en_US.UTF-8 pod install` afterwards. The plugin's Podfile edit is
+unit-tested against the SDK 57 template (`__tests__/with-firebase-modular-headers.test.ts`)
+and throws if a future Expo template loses the `use_expo_modules!` anchor.
 
 This is the **LIGHT stack** recipe and it is correct for this app, which pulls in
 only Firebase messaging (no `FirebaseAuth` pod — auth is the JS SDK). If
@@ -232,8 +238,9 @@ Also worth knowing:
 
 Nothing below can be checked from this repo.
 
-1. **Podfile** — the three `:modular_headers => true` lines above, after the
-   first `expo prebuild`. Not applied here; no `pod install` was run.
+1. **Podfile** — the three `:modular_headers => true` lines are now applied by
+   the config plugin on every prebuild; what remains manual is confirming that
+   `pod install` succeeds on the operator machine (no `pod install` was run here).
 2. **Service files** — `GoogleService-Info.plist` and `google-services.json`
    (§2). Absent by design.
 3. **Google sign-in console setup** — iOS + Web OAuth client ids, and the
