@@ -28,7 +28,8 @@ const PODS = ['GoogleUtilities', 'FirebaseCore', 'FirebaseCoreInternal'];
  */
 function patchPodfile(contents) {
   if (contents.includes(MARKER)) return contents;
-  const anchor = /^([ \t]*)use_expo_modules!\s*$/m;
+  // `[ \t]*` not `\s*`: `\s` would swallow the newline and shift the insert.
+  const anchor = /^([ \t]*)use_expo_modules![ \t]*$/m;
   const match = anchor.exec(contents);
   if (match === null) {
     throw new Error(

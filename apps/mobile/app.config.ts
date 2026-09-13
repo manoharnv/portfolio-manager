@@ -29,6 +29,9 @@ const ANDROID_PACKAGE = env('EXPO_PUBLIC_ANDROID_PACKAGE') ?? 'com.example.portf
 const GOOGLE_IOS_URL_SCHEME =
   env('EXPO_PUBLIC_GOOGLE_IOS_URL_SCHEME') ?? 'com.googleusercontent.apps.000000000000-placeholder';
 
+/** Apple Developer Team ID; lets `expo run:ios --device …` sign without Xcode. */
+const APPLE_TEAM_ID = env('EXPO_PUBLIC_APPLE_TEAM_ID');
+
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: 'Portfolio Manager',
@@ -45,8 +48,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ios: {
     supportsTablet: false,
     bundleIdentifier: IOS_BUNDLE_ID,
-    // Lets `expo run:ios --device …` sign without an Xcode round-trip.
-    ...(env('EXPO_PUBLIC_APPLE_TEAM_ID') ? { appleTeamId: env('EXPO_PUBLIC_APPLE_TEAM_ID') } : {}),
+    ...(APPLE_TEAM_ID !== undefined ? { appleTeamId: APPLE_TEAM_ID } : {}),
     usesAppleSignIn: true,
     // The operator drops the file here; it is gitignored (see README).
     googleServicesFile: './GoogleService-Info.plist',
