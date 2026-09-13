@@ -101,8 +101,8 @@ These never call broker order APIs, so their dynamic IPs are fine:
 
 ## 8.8 Monitoring & backup
 
-- **Uptime check** on `/v1/health`; alert on failure (fail-closed means no orders if
-  down — you want to know).
+- **Uptime check** on `/health` (unauthenticated, outside `/v1`); alert on failure
+  (fail-closed means no orders if down — you want to know).
 - **Metrics**: order latency, guardrail-block rate, token-expiry countdown, daily
   notional used vs cap.
 - **Log-based alerts**: `IP_NOT_WHITELISTED`, `AUTH_EXPIRED` bursts, place failures.
