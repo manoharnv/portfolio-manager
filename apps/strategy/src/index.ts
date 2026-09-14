@@ -18,7 +18,7 @@ import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { DhanInstrumentMaster, createDhanReadAdapter } from '@pm/broker-dhan';
 import { KiteInstrumentMaster, createKiteReadAdapter } from '@pm/broker-kite';
-import type { BrokerCreds, BrokerReadAdapter } from '@pm/core';
+import type { Broker, BrokerCreds, BrokerReadAdapter } from '@pm/core';
 import { createLogger } from './logger.js';
 import { readInstrumentsSource } from './instruments-source.js';
 import { runTick, type HarnessDeps } from './harness.js';
@@ -86,22 +86,119 @@ async function loadSecret(name: string): Promise<string> {
   return typeof data === 'string' ? data : Buffer.from(data).toString('utf8');
 }
 
-/** Read-only broker handle. Order capability is not reachable from this process. */
-async function buildReadAdapter(
-  creds: BrokerCreds,
-  instrumentsUrl: string,
-  now: Date,
-): Promise<BrokerReadAdapter> {
+function message(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The instrument master is loaded once, at start-up, for the broker the
+ * credentials name at that moment: the two brokers' masters are different
+ * files and `PM_INSTRUMENTS_URL` points at one of them.
+ */
+type LoadedMaster =
+  | { broker: 'dhan'; instruments: DhanInstrumentMaster }
+  | { broker: 'kite'; instruments: KiteInstrumentMaster };
+
+async function loadMaster(broker: Broker, instrumentsUrl: string, now: Date): Promise<LoadedMaster> {
   // file:// on the VM (the backend's local cache), http(s):// for local runs.
   const csv = await readInstrumentsSource(instrumentsUrl);
-  if (creds.broker === 'dhan') {
+  if (broker === 'dhan') {
     const instruments = new DhanInstrumentMaster();
     instruments.loadFromCsv(csv, now);
-    return createDhanReadAdapter(creds, { instruments });
+    return { broker, instruments };
   }
   const instruments = new KiteInstrumentMaster();
   instruments.loadFromCsv(csv, now);
-  return createKiteReadAdapter(creds, { instruments });
+  return { broker, instruments };
+}
+
+/** Read-only broker handle. Order capability is not reachable from this process. */
+function buildReadAdapter(creds: BrokerCreds, master: LoadedMaster): BrokerReadAdapter {
+  return master.broker === 'dhan'
+    ? createDhanReadAdapter(creds, { instruments: master.instruments })
+    : createKiteReadAdapter(creds, { instruments: master.instruments });
+}
+
+/** The credentials as last read from Secret Manager, and the adapter built from them. */
+interface BrokerHandle {
+  raw: string;
+  creds: BrokerCreds;
+  read: BrokerReadAdapter;
+}
+
+function parseCreds(raw: string): BrokerCreds {
+  const creds = JSON.parse(raw) as BrokerCreds;
+  if (creds.broker !== 'dhan' && creds.broker !== 'kite') {
+    throw new Error(`read-creds secret names no known broker (got '${String(creds.broker)}')`);
+  }
+  return creds;
+}
+
+/**
+ * Re-read the read-creds secret before a tick and rebuild the adapter when
+ * its payload changed. The execution backend rewrites that secret after every
+ * daily login and active-broker switch (apps/backend services/strategy-creds.ts),
+ * and this process must not run the day on yesterday's token. One small
+ * Secret Manager read per tick; nothing is rebuilt when nothing changed.
+ *
+ * Fail closed on trouble (docs/00 §0.7): a read or parse error keeps the
+ * previous credentials — whose session check refuses ticks once they expire —
+ * and a switch to the broker whose instrument master this process did NOT load
+ * is refused with an error: the unit has to be restarted with the matching
+ * `PM_INSTRUMENTS_URL`.
+ */
+async function refreshBroker(
+  previous: BrokerHandle,
+  secretName: string,
+  master: LoadedMaster,
+  logger: HarnessDeps['logger'],
+): Promise<BrokerHandle> {
+  let raw: string;
+  let creds: BrokerCreds;
+  try {
+    raw = await loadSecret(secretName);
+    if (raw === previous.raw) return previous;
+    creds = parseCreds(raw);
+  } catch (err) {
+    logger.error(
+      { err: message(err) },
+      'could not re-read the broker read-creds secret — keeping the previous credentials',
+    );
+    return previous;
+  }
+  if (creds.broker !== master.broker) {
+    logger.error(
+      { loaded: master.broker, wanted: creds.broker },
+      'active broker changed but this process loaded the other broker\'s instrument master — restart pm-strategy with the matching PM_INSTRUMENTS_URL; keeping the previous credentials',
+    );
+    return previous;
+  }
+  const read = buildReadAdapter(creds, master);
+  logger.info(
+    { broker: creds.broker, expiresAt: creds[creds.broker]?.expiresAt },
+    'broker credentials refreshed',
+  );
+  return { raw, creds, read };
+}
+
+type BaseDeps = Omit<HarnessDeps, 'read' | 'portfolio' | 'market' | 'sessions'>;
+
+/** Everything a tick needs that is not the broker: fixed for the process lifetime. */
+function withBroker(base: BaseDeps, read: BrokerReadAdapter): HarnessDeps {
+  return {
+    ...base,
+    read,
+    portfolio: createBrokerPortfolioSource(read),
+    market: createBrokerMarketData(read),
+    sessions: createBrokerSessionSource(read),
+  };
+}
+
+interface TickRunner {
+  clock: HarnessDeps['clock'];
+  logger: HarnessDeps['logger'];
+  /** Refreshes the broker credentials, then hands back this tick's deps. */
+  resolveDeps(): Promise<HarnessDeps>;
 }
 
 export async function main(): Promise<void> {
@@ -113,27 +210,43 @@ export async function main(): Promise<void> {
   }
   const db: FirestoreLike = getFirestore();
 
-  const creds = JSON.parse(await loadSecret(env.brokerSecret)) as BrokerCreds;
-  const read = await buildReadAdapter(creds, env.instrumentsUrl, new Date());
+  const startedAt = new Date();
+  const initialRaw = await loadSecret(env.brokerSecret);
+  const initialCreds = parseCreds(initialRaw);
+  const master = await loadMaster(initialCreds.broker, env.instrumentsUrl, startedAt);
+  let broker: BrokerHandle = {
+    raw: initialRaw,
+    creds: initialCreds,
+    read: buildReadAdapter(initialCreds, master),
+  };
+  logger.info(
+    { broker: initialCreds.broker, expiresAt: initialCreds[initialCreds.broker]?.expiresAt },
+    'broker credentials loaded',
+  );
 
-  const deps: HarnessDeps = {
+  const base: BaseDeps = {
     configRepo: createFirestoreConfigRepo(db),
     defsRepo: createFirestoreStrategyDefsRepo(db),
     proposalRepo: createFirestoreProposalRepo(db),
     auditLog: createFirestoreAuditLog(db),
-    portfolio: createBrokerPortfolioSource(read),
-    market: createBrokerMarketData(read),
     ledgerRepo: createFirestoreLedgerRepo(db),
     bookRepo: createFirestoreBookRepo(db),
-    sessions: createBrokerSessionSource(read),
     aggregates: createFirestoreAggregatesSource(db),
     clock: { now: (): Date => new Date() },
     ids: {
       next: (prefix: string): string => `${prefix}_${crypto.randomUUID()}`,
     },
-    read,
     logger,
     holidays: env.holidays,
+  };
+
+  const runner: TickRunner = {
+    clock: base.clock,
+    logger,
+    resolveDeps: async (): Promise<HarnessDeps> => {
+      broker = await refreshBroker(broker, env.brokerSecret, master, logger);
+      return withBroker(base, broker.read);
+    },
   };
 
   const schedule: ScheduleConfig = resolveSchedule({
@@ -145,33 +258,31 @@ export async function main(): Promise<void> {
   for (const tick of TICKS) {
     const pattern = patterns[tick];
     new Cron(pattern, { timezone: IST, name: `strategy-${tick}` }, () => {
-      void runOne(tick, env.uid, deps, schedule);
+      void runOne(tick, env.uid, schedule, runner);
     });
     logger.info({ tick, pattern }, 'tick scheduled');
   }
 
-  logger.info({ uid: env.uid, broker: read.broker }, 'strategy engine started (proposals only)');
+  logger.info({ uid: env.uid, broker: broker.read.broker }, 'strategy engine started (proposals only)');
 }
 
 async function runOne(
   tick: Tick,
   uid: string,
-  deps: HarnessDeps,
   schedule: ScheduleConfig,
+  runner: TickRunner,
 ): Promise<void> {
-  const now = deps.clock.now();
+  const now = runner.clock.now();
   if (!isTickDue(now, tick, schedule)) return;
   try {
+    const deps = await runner.resolveDeps();
     const summary = await runTick({ uid, tick, deps });
-    deps.logger.info(
+    runner.logger.info(
       { tick, written: summary.written.length, dropped: summary.dropped.length },
       'tick complete',
     );
   } catch (err) {
-    deps.logger.error(
-      { tick, err: err instanceof Error ? err.message : String(err) },
-      'tick failed',
-    );
+    runner.logger.error({ tick, err: message(err) }, 'tick failed');
   }
 }
 
