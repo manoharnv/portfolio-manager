@@ -321,6 +321,7 @@ export function makeBackendConfig(patch?: Deep<BackendConfig>): BackendConfig {
       },
       allowedUids: ['u1'],
       staticIp: '203.0.113.7',
+      instrumentsCacheDir: '',
       rateLimit: { max: 60, windowMs: 60_000 },
       reconcileIntervalMs: 15_000,
       portfolioRefreshIntervalMs: 60_000,

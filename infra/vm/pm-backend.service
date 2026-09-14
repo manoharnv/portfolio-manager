@@ -23,6 +23,9 @@ User=pm-backend
 Group=pm-backend
 WorkingDirectory=/opt/pm
 EnvironmentFile=/etc/pm/backend.env
+# The VM has no IPv6 egress; without this Node tries every AAAA record first
+# (ENETUNREACH, then falls back) on each connection to a dual-stack host.
+Environment=NODE_OPTIONS=--dns-result-order=ipv4first
 ExecStart=/usr/bin/node apps/backend/dist/index.js
 Restart=always
 RestartSec=5
@@ -53,12 +56,13 @@ SystemCallErrorNumber=EPERM
 # NOT MemoryDenyWriteExecute — Node/V8's JIT needs writable+executable
 # memory mappings; enabling this can crash or cripple the runtime.
 
-# /opt/pm is read-only at runtime (ProtectSystem=strict + no ReadWritePaths
-# below): the backend only makes outbound HTTPS calls (Firestore, Secret
-# Manager, brokers) and listens on 127.0.0.1:$PORT — it has no local file to
-# write. PrivateTmp=true still gives it an isolated /tmp if something
-# transient ever needs one. Add a ReadWritePaths= line here (and re-run
-# bootstrap.sh) if a future feature needs local disk state.
+# /opt/pm is read-only at runtime (ProtectSystem=strict). The ONE writable
+# path is the instrument-master cache the backend refreshes for the strategy
+# engine to read via file:// (INSTRUMENTS_CACHE_DIR in backend.env;
+# apps/backend/src/instruments-cache.ts; docs/11 §11.4 #8). bootstrap.sh
+# creates it owned by pm-backend, mode 0755. PrivateTmp=true still gives the
+# unit an isolated /tmp for anything transient.
+ReadWritePaths=/var/lib/pm/instruments
 
 [Install]
 WantedBy=multi-user.target

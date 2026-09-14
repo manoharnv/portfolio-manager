@@ -20,6 +20,7 @@ import { DhanInstrumentMaster, createDhanReadAdapter } from '@pm/broker-dhan';
 import { KiteInstrumentMaster, createKiteReadAdapter } from '@pm/broker-kite';
 import type { BrokerCreds, BrokerReadAdapter } from '@pm/core';
 import { createLogger } from './logger.js';
+import { readInstrumentsSource } from './instruments-source.js';
 import { runTick, type HarnessDeps } from './harness.js';
 import { TICKS, type Tick } from './types.js';
 import { cronExpressions, isTickDue, resolveSchedule, type ScheduleConfig } from './schedule.js';
@@ -85,21 +86,14 @@ async function loadSecret(name: string): Promise<string> {
   return typeof data === 'string' ? data : Buffer.from(data).toString('utf8');
 }
 
-async function fetchText(url: string): Promise<string> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`GET ${url} failed with ${response.status}`);
-  }
-  return response.text();
-}
-
 /** Read-only broker handle. Order capability is not reachable from this process. */
 async function buildReadAdapter(
   creds: BrokerCreds,
   instrumentsUrl: string,
   now: Date,
 ): Promise<BrokerReadAdapter> {
-  const csv = await fetchText(instrumentsUrl);
+  // file:// on the VM (the backend's local cache), http(s):// for local runs.
+  const csv = await readInstrumentsSource(instrumentsUrl);
   if (creds.broker === 'dhan') {
     const instruments = new DhanInstrumentMaster();
     instruments.loadFromCsv(csv, now);

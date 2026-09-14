@@ -195,6 +195,11 @@ UNIT
 # ---------------------------------------------------------------------------
 install -d -m 0755 /etc/pm
 
+# Instrument-master cache: written by pm-backend (INSTRUMENTS_CACHE_DIR), read
+# by pm-strategy via file:// (PM_INSTRUMENTS_URL). Owned by the writer, 0755 so
+# the reader can traverse it — pm-backend.service grants ReadWritePaths= on it.
+install -d -m 0755 -o pm-backend -g pm-backend /var/lib/pm/instruments
+
 if [[ ! -f /etc/pm/backend.env ]]; then
 	log "seeding /etc/pm/backend.env from the example (fill in secrets project / ENVIRONMENT / MARKET_HOLIDAYS before going live)"
 	cp "${REPO_DIR}/infra/vm/env/backend.env.example" /etc/pm/backend.env

@@ -26,6 +26,7 @@ import {
 } from '@pm/broker-kite';
 import { parseConfig } from './config.js';
 import { createLogger } from './logger.js';
+import { DHAN_CACHE_FILE, KITE_CACHE_FILE, writeInstrumentCache } from './instruments-cache.js';
 import { createFirebaseTokenVerifier } from './adapters/firebase-auth.js';
 import { createSecretManagerStore } from './adapters/secret-manager.js';
 import {
@@ -118,13 +119,21 @@ async function main(): Promise<void> {
   const kiteCsvHttp = createKiteHttp({ defaultTimeoutMs: csvTimeoutMs });
   const dhanInstruments = new DhanInstrumentMaster();
   const kiteInstruments = new KiteInstrumentMaster();
+  // Each master is also written to INSTRUMENTS_CACHE_DIR (when set) for the
+  // strategy engine to read via file:// — see instruments-cache.ts.
   try {
-    dhanInstruments.loadFromCsv(await fetchDhanCsv(dhanCsvHttp), clock.now());
+    const csv = await fetchDhanCsv(dhanCsvHttp);
+    dhanInstruments.loadFromCsv(csv, clock.now());
+    const cached = await writeInstrumentCache(config.instrumentsCacheDir, DHAN_CACHE_FILE, csv);
+    if (cached !== undefined) logger.info(cached, 'cached the Dhan scrip master');
   } catch (err) {
     logger.error({ err: String(err) }, 'failed to load the Dhan scrip master');
   }
   try {
-    kiteInstruments.loadFromCsv(await fetchKiteCsv(kiteCsvHttp, KITE_INSTRUMENTS_URL), clock.now());
+    const csv = await fetchKiteCsv(kiteCsvHttp, KITE_INSTRUMENTS_URL);
+    kiteInstruments.loadFromCsv(csv, clock.now());
+    const cached = await writeInstrumentCache(config.instrumentsCacheDir, KITE_CACHE_FILE, csv);
+    if (cached !== undefined) logger.info(cached, 'cached the Kite instrument master');
   } catch (err) {
     logger.error({ err: String(err) }, 'failed to load the Kite instrument master');
   }

@@ -99,6 +99,11 @@ const RawConfigSchema = z.object({
   ALLOWED_UIDS: csvList,
   /** Written to `orders.ipUsed` and every audit event (docs/04 §4.9). */
   STATIC_IP: stringEnv(''),
+  /**
+   * Directory where the downloaded instrument masters are cached for the
+   * strategy engine to read via file:// (docs/11 §11.4 #8). Empty ⇒ disabled.
+   */
+  INSTRUMENTS_CACHE_DIR: stringEnv(''),
 
   RATE_LIMIT_MAX: intEnv(60, 1, 10_000),
   RATE_LIMIT_WINDOW_MS: intEnv(60_000, 100, 3_600_000),
@@ -125,6 +130,8 @@ export interface BackendConfig {
   /** Empty ⇒ deny all (fail closed). */
   allowedUids: readonly string[];
   staticIp: string;
+  /** '' ⇒ no local instrument-master cache is written. */
+  instrumentsCacheDir: string;
   rateLimit: { max: number; windowMs: number };
   reconcileIntervalMs: number;
   portfolioRefreshIntervalMs: number;
@@ -190,6 +197,7 @@ export function parseConfig(env: Env): BackendConfig {
     },
     allowedUids: raw.ALLOWED_UIDS,
     staticIp: raw.STATIC_IP,
+    instrumentsCacheDir: raw.INSTRUMENTS_CACHE_DIR,
     rateLimit: { max: raw.RATE_LIMIT_MAX, windowMs: raw.RATE_LIMIT_WINDOW_MS },
     reconcileIntervalMs: raw.RECONCILE_INTERVAL_MS,
     portfolioRefreshIntervalMs: raw.PORTFOLIO_REFRESH_INTERVAL_MS,

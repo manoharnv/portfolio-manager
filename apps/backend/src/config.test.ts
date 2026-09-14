@@ -49,6 +49,13 @@ describe('parseConfig', () => {
     expect(() => parseConfig({ ...PROD_MIN, ALLOWED_UIDS: '' })).toThrow(/ALLOWED_UIDS/);
   });
 
+  it('defaults the instrument cache to disabled and passes a directory through verbatim', () => {
+    expect(parseConfig({}).instrumentsCacheDir).toBe('');
+    expect(
+      parseConfig({ INSTRUMENTS_CACHE_DIR: '/var/lib/pm/instruments' }).instrumentsCacheDir,
+    ).toBe('/var/lib/pm/instruments');
+  });
+
   it('allows a blank STATIC_IP outside prod', () => {
     expect(parseConfig({ ENVIRONMENT: 'dry-run' }).staticIp).toBe('');
   });

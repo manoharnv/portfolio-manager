@@ -28,6 +28,8 @@ User=pm-strategy
 Group=pm-strategy
 WorkingDirectory=/opt/pm
 EnvironmentFile=/etc/pm/strategy.env
+# IPv4-only VM — same reason as pm-backend.service.
+Environment=NODE_OPTIONS=--dns-result-order=ipv4first
 ExecStart=/usr/bin/node apps/strategy/dist/index.js
 Restart=always
 RestartSec=5
