@@ -142,6 +142,23 @@ resource "google_secret_manager_secret_iam_member" "backend_version_adder" {
   member    = "serviceAccount:${google_service_account.pm_backend.email}"
 }
 
+# Operating window (vm.tf `pm_backend_schedule`): Compute Engine's own service
+# agent is what starts and stops the VM on the instance schedule, and it needs
+# instanceAdmin.v1 on the project to do so — without this grant the schedule
+# is accepted but silently never fires. This is Google's service agent, not
+# one of our SAs; it gains nothing on Firestore/Secret Manager.
+data "google_project" "current" {
+  project_id = var.project_id
+}
+
+resource "google_project_iam_member" "compute_agent_instance_admin" {
+  count = var.vm_schedule_enabled ? 1 : 0
+
+  project = var.project_id
+  role    = "roles/compute.instanceAdmin.v1"
+  member  = "serviceAccount:service-${data.google_project.current.number}@compute-system.iam.gserviceaccount.com"
+}
+
 # Strategy: accessor on the READ-creds secret ONLY — no `for_each` over
 # `backend_secret_ids` here, ever. This is the literal implementation of
 # docs/11 §11.4 #3's "no Secret Manager access to order/token secrets."

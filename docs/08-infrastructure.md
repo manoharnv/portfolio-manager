@@ -22,6 +22,19 @@ must have a stable static IP** that we whitelist with the broker.
 | Disk | 20–30 GB standard PD |
 | Cost | ~$7–8/month |
 
+**Operating window.** The VM does not run 24/7. A Compute Engine instance schedule
+(`infra/terraform/vm.tf`, `Asia/Kolkata`) starts it at **07:15 IST** and stops it at
+**16:15 IST**, Mon–Fri: two hours of pre-market before the 09:15 open (global
+markets, news, strategy setup, the opening gap) and a buffer after the 15:45 eod tick
+and the reconcile loop settle. Every strategy tick (pre-open 09:00, intraday
+09:15–15:30, eod 15:45) and the backend's loops fall inside the window; disk
+snapshots (00:00 IST) run against the stopped disk; Cloud Functions, Firestore and
+FCM are independent of the VM. Consequences: `bootstrap.sh` clones/builds on the
+*first* boot only (deploys stay explicit via `deploy.sh`); the 24/7 uptime check is
+replaced by an in-window `/health` ping; and the reserved static IP is billed at the
+higher *unused* rate while the VM is off (it must stay reserved — it's what the
+brokers whitelist). Set `vm_schedule_enabled = false` for always-on.
+
 Runs two units (both TypeScript/Node, isolated as separate systemd services / users):
 
 ```
@@ -101,8 +114,10 @@ These never call broker order APIs, so their dynamic IPs are fine:
 
 ## 8.8 Monitoring & backup
 
-- **Uptime check** on `/health` (unauthenticated, outside `/v1`); alert on failure
-  (fail-closed means no orders if down — you want to know).
+- **Health signal** on `/health` (unauthenticated, outside `/v1`): in the default
+  scheduled-VM mode a Cloud Scheduler ping at 07:45 IST + a log-based alert on its
+  failure ("not up during the trading window"); in always-on mode a 24/7 uptime
+  check + alert. Either way, fail-closed means no orders if down — you want to know.
 - **Metrics**: order latency, guardrail-block rate, token-expiry countdown, daily
   notional used vs cap.
 - **Log-based alerts**: `IP_NOT_WHITELISTED`, `AUTH_EXPIRED` bursts, place failures.
@@ -111,13 +126,26 @@ These never call broker order APIs, so their dynamic IPs are fine:
 
 ## 8.9 Cost summary
 
-| Item | Monthly |
-|---|---|
-| e2-micro (asia-south1) | ~$7–8 |
-| Static IP (attached) | $0 |
-| Firestore/Auth/FCM/Functions (single user) | ~$0 (free tier) |
-| Secret Manager | ~$0 (few secrets) |
-| GCS backups | negligible |
-| Dhan orders | free |
-| Dhan data | ₹0 (25+ trades/mo) or ₹499 |
-| **Total** | **~₹600–₹1,300/month** |
+Published asia-south1 rates (Sep 2026); the operating window is ~9 h × ~21 trading
+days ≈ 190 h/month running, ≈ 540 h stopped.
+
+| Item | Basis | Monthly |
+|---|---|---|
+| e2-micro (asia-south1), in-window only | $0.0101/h × ~190 h | ~$1.9 |
+| 30 GB standard boot disk | $0.048/GB-mo, billed while stopped too | ~$1.4 |
+| Reserved static IPv4 | in-use $0.005/h × 190 h + **unused $0.01/h × 540 h** | ~$6.4 |
+| Daily disk snapshots (7-day retention) | ~7 GB incremental | ~$0.4 |
+| Secret Manager (8 secrets, old versions destroyed) | 2 paid versions × $0.06 | ~$0.1 |
+| Cloud Functions / Scheduler / image storage | inside free tiers | ~$0.1 |
+| Firestore / Auth / FCM / Monitoring / Logging / egress | single-user volumes, free tiers | ~$0.1 |
+| **GCP total (scheduled window)** | | **≈ $10.5 ≈ ₹900 (≈ ₹1,050 incl. 18% GST)** |
+| *GCP total if always-on instead* | VM $7.3 + IP $3.7 | *≈ $13 ≈ ₹1,300 incl. GST* |
+| Dhan orders | | free |
+| Dhan market data | waived at 25+ trades/30 days | ₹0 or ₹499 |
+| Domain for the HTTPS hostname | amortised | ~₹100 |
+
+Note the reserved IP is now the largest line: an unattached static IP costs double
+the in-use rate, and it cannot be released between sessions because it is the
+whitelisted address. Stopping the VM saves ~₹230/month net, not the full compute
+cost — the operating window is justified by the operating envelope (pre-market
+routine, no off-hours attack surface), not primarily by cost.

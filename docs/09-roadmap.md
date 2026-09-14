@@ -69,6 +69,11 @@ proven**. Every phase is independently useful.
   ([10](10-multi-strategy.md) §10.7).
 - **Claude-reasoned routine** with restricted `writeProposal`-only toolset (proposals
   only — never in any auto-exec path).
+- **Pre-market routine (07:15–09:00 IST)** — the VM's operating window deliberately
+  opens two hours before the bell for this: review overnight global markets and news,
+  set up the day's strategy parameters, and stage opening-gap proposals for the 09:15
+  open. Needs a new `pre-market` tick in the engine; today only the 09:00 `pre-open`
+  hook exists. Same boundary as everything else: proposals only.
 - Richer analytics (XIRR, drawdown, per-book P&L, allocation, dividends), reports,
   kill-switch drills.
 - **Exit:** all four horizons coexisting under books + coordinator + risk manager, all

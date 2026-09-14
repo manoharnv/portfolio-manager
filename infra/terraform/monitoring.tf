@@ -33,7 +33,13 @@ resource "google_monitoring_notification_channel" "email" {
 # is under `/v1/*` and requires auth. This check hits the public HTTPS name
 # (Caddy terminates TLS on 443 and reverse-proxies to the backend's
 # `config.port`, default 8080, on 127.0.0.1 only).
+#
+# ALWAYS-ON MODE ONLY (`vm_schedule_enabled = false`). In the default scheduled
+# mode the VM is intentionally off ~15 h/day, so a 24/7 uptime check would
+# page every evening and train you to ignore it — see `window_health` below.
 resource "google_monitoring_uptime_check_config" "backend_health" {
+  count = var.vm_schedule_enabled ? 0 : 1
+
   project      = var.project_id
   display_name = "pm-backend /health"
   timeout      = "10s"
@@ -58,6 +64,8 @@ resource "google_monitoring_uptime_check_config" "backend_health" {
 }
 
 resource "google_monitoring_alert_policy" "backend_down" {
+  count = var.vm_schedule_enabled ? 0 : 1
+
   project      = var.project_id
   display_name = "pm-backend down (uptime check failing)"
   combiner     = "OR"
@@ -65,7 +73,7 @@ resource "google_monitoring_alert_policy" "backend_down" {
   conditions {
     display_name = "/health check failing"
     condition_threshold {
-      filter          = "resource.type=\"uptime_url\" AND metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND metric.label.\"check_id\"=\"${google_monitoring_uptime_check_config.backend_health.uptime_check_id}\""
+      filter          = "resource.type=\"uptime_url\" AND metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND metric.label.\"check_id\"=\"${google_monitoring_uptime_check_config.backend_health[0].uptime_check_id}\""
       comparison      = "COMPARISON_LT"
       threshold_value = 1
       duration        = "180s"
@@ -87,6 +95,91 @@ resource "google_monitoring_alert_policy" "backend_down" {
 
   documentation {
     content   = "docs/08 §8.8: fail-closed means no orders while the backend is down — treat this as urgent, not routine. Incident playbook: infra/README.md#incident-playbook."
+    mime_type = "text/markdown"
+  }
+}
+
+# SCHEDULED MODE (default): "is the backend up when it is supposed to be?"
+# A Cloud Scheduler job GETs /health 30 min after the scheduled VM start
+# (boot + service start take ~2 min on an e2-micro; 3 retries a minute apart
+# absorb a slow morning), and a log-based alert fires when the job itself
+# reports failure. This is the 3rd Cloud Scheduler job in the project (the
+# other two are the Cloud Functions' cron triggers) — still inside the free
+# tier. `backend_fatal_crash` below remains the fast signal for a unit that
+# fails to start at all.
+resource "google_cloud_scheduler_job" "window_health" {
+  count = var.vm_schedule_enabled ? 1 : 0
+
+  project          = var.project_id
+  region           = var.region
+  name             = "pm-backend-window-health"
+  description      = "In-window /health ping — replaces the 24/7 uptime check while the VM runs on a schedule (docs/08 §8.2)."
+  schedule         = var.vm_health_ping_cron
+  time_zone        = "Asia/Kolkata"
+  attempt_deadline = "30s"
+
+  retry_config {
+    retry_count          = 3
+    min_backoff_duration = "60s"
+    max_backoff_duration = "120s"
+  }
+
+  http_target {
+    http_method = "GET"
+    uri         = "https://${var.domain}/health"
+  }
+
+  depends_on = [google_project_service.this]
+}
+
+resource "google_logging_metric" "window_health_failed" {
+  count = var.vm_schedule_enabled ? 1 : 0
+
+  project     = var.project_id
+  name        = "pm-window-health-failed"
+  description = "The in-window /health ping (Cloud Scheduler job pm-backend-window-health) failed after retries — the backend is not up during trading hours."
+  # VERIFY-LIVE (infra): Cloud Scheduler logs a job's final failure with
+  # resource.type="cloud_scheduler_job" at severity ERROR; confirm the label
+  # name (job_id) and severity on the first real failure and tighten if needed.
+  filter = "resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=\"pm-backend-window-health\" AND severity>=ERROR"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_monitoring_alert_policy" "window_health_failed" {
+  count = var.vm_schedule_enabled ? 1 : 0
+
+  project      = var.project_id
+  display_name = "pm-backend not up during trading window"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "in-window /health ping failed"
+    condition_threshold {
+      filter          = "resource.type=\"cloud_scheduler_job\" AND metric.type=\"logging.googleapis.com/user/${google_logging_metric.window_health_failed[0].name}\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_COUNT"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [google_monitoring_notification_channel.email.id]
+
+  documentation {
+    content   = "The VM should have been started by its instance schedule 30 min ago and /health is not answering. Check: instance schedule fired (Compute Engine → VM → details), `systemctl status pm-backend caddy` over IAP SSH, Caddy certificate. Fail-closed means no orders until this is green. Incident playbook: infra/README.md#incident-playbook."
     mime_type = "text/markdown"
   }
 }

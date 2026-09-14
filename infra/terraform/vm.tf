@@ -79,9 +79,51 @@ resource "google_compute_instance" "pm_backend" {
   # deliberate `terraform apply` with this flipped to false first.
   deletion_protection = true
 
+  # Operating window (docs/08 §8.2): started/stopped by the instance schedule
+  # below. Empty when the schedule is disabled (always-on mode).
+  resource_policies = var.vm_schedule_enabled ? [google_compute_resource_policy.pm_backend_schedule[0].self_link] : []
+
   labels = {
     app = "portfolio-manager"
     env = "prod"
+  }
+}
+
+# ---- operating window -------------------------------------------------------
+# The VM only needs to exist during the Indian trading day plus a pre-market
+# window: up at 07:15 IST (two hours before the 09:15 open, for pre-market
+# study and the opening gap), down at 16:15 IST (after the 15:45 eod tick and
+# the reconcile loop have settled). Compute Engine's native instance schedule
+# does this for free — no Cloud Function, no cron on the box.
+#
+# Costs that this changes (docs/08 §8.9): compute is billed only while
+# running, but the reserved static IP is billed at the *unused* rate
+# ($0.01/h, double the in-use rate) while the VM is stopped — and it must stay
+# reserved, because it is the address the brokers whitelist.
+#
+# Known limitation: no holiday calendar — the VM also runs on NSE holidays
+# that fall Mon–Fri (~9 h × ~15 days/yr ≈ $0.10/month). The strategy engine
+# itself no-ops on holidays via PM_HOLIDAYS.
+#
+# Requires roles/compute.instanceAdmin.v1 on the Compute Engine service agent
+# (iam.tf `compute_agent_instance_admin`), or the schedule silently never fires.
+resource "google_compute_resource_policy" "pm_backend_schedule" {
+  count = var.vm_schedule_enabled ? 1 : 0
+
+  project = var.project_id
+  region  = var.region
+  name    = "pm-backend-trading-window"
+
+  instance_schedule_policy {
+    time_zone = "Asia/Kolkata"
+
+    vm_start_schedule {
+      schedule = var.vm_start_cron
+    }
+
+    vm_stop_schedule {
+      schedule = var.vm_stop_cron
+    }
   }
 }
 

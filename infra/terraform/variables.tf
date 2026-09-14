@@ -103,3 +103,35 @@ variable "repo_ref" {
   type        = string
   default     = "main"
 }
+
+# ---- operating window (docs/08 §8.2) --------------------------------------
+
+variable "vm_schedule_enabled" {
+  description = <<-EOT
+    Run the VM only during the trading window via a Compute Engine instance
+    schedule (start/stop crons below, Asia/Kolkata). true = scheduled mode
+    (default): the 24/7 uptime check is replaced by a Cloud Scheduler /health
+    ping at `vm_health_ping_cron`, because a box that is off ~15 h/day would
+    otherwise page every evening. false = always-on with the uptime check.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "vm_start_cron" {
+  description = "Instance-schedule START cron in Asia/Kolkata. Default 07:15 IST Mon–Fri: two hours before the 09:15 open for pre-market study / the opening gap."
+  type        = string
+  default     = "15 7 * * 1-5"
+}
+
+variable "vm_stop_cron" {
+  description = "Instance-schedule STOP cron in Asia/Kolkata. Default 16:15 IST Mon–Fri: after the 15:30 close, the 15:45 eod tick and the reconcile loop have settled. Never earlier than 16:00."
+  type        = string
+  default     = "15 16 * * 1-5"
+}
+
+variable "vm_health_ping_cron" {
+  description = "Cloud Scheduler cron (Asia/Kolkata) for the in-window /health ping — 30 min after `vm_start_cron` so boot + service start (~2 min on e2-micro) are long done."
+  type        = string
+  default     = "45 7 * * 1-5"
+}

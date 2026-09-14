@@ -102,12 +102,20 @@ terraform apply
 
 This is also where the **Firestore Native database in `asia-south1`** gets
 created (`firestore.tf`'s `google_firestore_database`), along with its
-7-day-retention backup schedule and the GCS export bucket. **Do not**
-separately run `gcloud firestore databases create` first — Firestore
-permits exactly one default database per project, and `terraform apply`
-will fail with "database already exists" if you do. (Firebase being
-"enabled" on the project in 0.3 does not itself create a Firestore
-database, so there's no ordering conflict either way — the two are
+7-day-retention backup schedule and the GCS export bucket. Firestore permits
+exactly one default database per project, so if the database **already
+exists** (created earlier with `gcloud firestore databases create` or in the
+Firebase console — e.g. to deploy rules before the VM), `terraform apply`
+fails with "database already exists". Adopt it into state once instead of
+recreating it:
+
+```bash
+terraform import google_firestore_database.this "projects/<PROJECT_ID>/databases/(default)"
+terraform plan   # expect only in-place updates on the database (delete protection, etc.), never a replace
+```
+
+(Firebase being "enabled" on the project in 0.3 does not itself create a
+Firestore database, so there's no ordering conflict either way — the two are
 independent GCP-level concerns.)
 
 Note the outputs — you need `static_ip` for the next two steps:
@@ -532,3 +540,35 @@ exactly (same name, same default). `apps/strategy/src/index.ts`'s
 `readEnv()` is matched the same way against `env/strategy.env.example`.
 **No mismatches found** — see the final report for this task for the full
 line-by-line table.
+
+## 5. Operating window — the VM runs on a schedule
+
+The VM is **not** always on. `infra/terraform/vm.tf` attaches a Compute Engine
+instance schedule (`Asia/Kolkata`): **start 07:15 IST, stop 16:15 IST, Mon–Fri**
+(`vm_start_cron` / `vm_stop_cron` in `terraform.tfvars`). Two hours of pre-market
+before the 09:15 open for global-market/news review and the opening gap; a
+45-minute buffer after the 15:30 close for the 15:45 eod tick and the reconcile
+loop.
+
+What this means operationally:
+
+- **Deploys are explicit.** `bootstrap.sh` clones and builds on the *first* boot
+  only; on every scheduled start it re-installs units/configs and starts the
+  services but never touches the checkout. Ship code with `infra/scripts/deploy.sh`.
+- **Health is checked in-window, not 24/7.** A Cloud Scheduler job pings
+  `https://<DOMAIN>/health` at 07:45 IST; its failure raises the
+  "pm-backend not up during trading window" alert. The 24/7 uptime check only
+  exists when `vm_schedule_enabled = false`.
+- **Holidays are not excluded.** The VM also runs on NSE holidays that fall on a
+  weekday (~$0.10/month); the strategy engine no-ops on them via `PM_HOLIDAYS`.
+- **The static IP costs more while the VM is off** (unused reserved IP: $0.01/h vs
+  $0.005/h in use) and must stay reserved — it is the whitelisted address. Net
+  saving vs always-on is ~₹230/month; the window is about the operating envelope
+  more than cost (docs/08 §8.9).
+- **Applying Terraform while the VM is stopped** (off-hours) is fine; the provider
+  does not force a start. To run outside the window (an incident, a manual test):
+  `gcloud compute instances start pm-backend-vm --zone asia-south1-a` — the next
+  scheduled stop will still shut it down.
+- **Requires** `roles/compute.instanceAdmin.v1` on the Compute Engine service agent
+  (granted in `iam.tf`) — without it the schedule silently never fires. Verify on
+  day 1 (docs/11 §11.6 #9).

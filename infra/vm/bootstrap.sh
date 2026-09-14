@@ -119,18 +119,23 @@ id -u pm-strategy >/dev/null 2>&1 || useradd --system --no-create-home --shell /
 #    and EXECUTE `dist/`, never write it. All writable per-service state
 #    lives under /etc/pm/ instead, owned per-unit (step 8).
 # ---------------------------------------------------------------------------
+#    FIRST BOOT ONLY. The VM is started by an instance schedule every trading
+#    morning (docs/08 §8.2 operating window), so this script runs daily — it
+#    must NOT fetch/reset/rebuild on every boot: that would be an unreviewed
+#    auto-deploy of whatever is on ${REPO_REF} at 07:15, and a multi-minute
+#    build on an e2-micro right before the pre-open tick. Code changes reach
+#    the box only through infra/scripts/deploy.sh (explicit ref, refuses a
+#    dirty tree). Steps 6–10 below still re-run every boot so unit/config
+#    edits shipped by deploy.sh are picked up on the next start.
+# ---------------------------------------------------------------------------
 if [[ ! -d "${REPO_DIR}/.git" ]]; then
-	log "cloning ${REPO_URL}#${REPO_REF} into ${REPO_DIR}"
+	log "first boot: cloning ${REPO_URL}#${REPO_REF} into ${REPO_DIR}"
 	git clone --branch "${REPO_REF}" "${REPO_URL}" "${REPO_DIR}"
+	log "pnpm install (frozen lockfile) + build"
+	(cd "${REPO_DIR}" && pnpm install --frozen-lockfile && pnpm build)
 else
-	log "updating existing checkout at ${REPO_DIR}"
-	git -C "${REPO_DIR}" fetch origin "${REPO_REF}"
-	git -C "${REPO_DIR}" checkout "${REPO_REF}"
-	git -C "${REPO_DIR}" reset --hard "origin/${REPO_REF}"
+	log "existing checkout at ${REPO_DIR} ($(git -C "${REPO_DIR}" rev-parse --short HEAD)) — not touching it; deploys go through infra/scripts/deploy.sh"
 fi
-
-log "pnpm install (frozen lockfile) + build"
-(cd "${REPO_DIR}" && pnpm install --frozen-lockfile && pnpm build)
 
 # ---------------------------------------------------------------------------
 # 6. nftables — strategy egress allowlist (docs/01 §1.5, docs/08 §8.2).
