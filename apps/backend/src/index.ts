@@ -239,6 +239,7 @@ async function main(): Promise<void> {
         http: kiteHttp,
         dhanHttp,
         secretNames: config.secrets,
+        kiteUserId: config.kiteUserId,
         activeBrokerFor: async (uid) => (await configs.get(uid))?.activeBroker,
         strategyCreds,
         logger,

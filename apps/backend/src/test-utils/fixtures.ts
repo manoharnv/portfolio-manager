@@ -319,6 +319,7 @@ export function makeBackendConfig(patch?: Deep<BackendConfig>): BackendConfig {
           clientId: '',
         },
       },
+      kiteUserId: 'AB1234',
       allowedUids: ['u1'],
       staticIp: '203.0.113.7',
       instrumentsCacheDir: '',

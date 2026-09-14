@@ -15,9 +15,11 @@
  */
 import { chmod, mkdir, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { INSTRUMENT_MASTER_FILE } from '@pm/core';
 
-export const DHAN_CACHE_FILE = 'dhan-scrip-master.csv';
-export const KITE_CACHE_FILE = 'kite-instruments.csv';
+/** Names shared with the strategy engine through `@pm/core`. */
+export const DHAN_CACHE_FILE = INSTRUMENT_MASTER_FILE.dhan;
+export const KITE_CACHE_FILE = INSTRUMENT_MASTER_FILE.kite;
 
 export interface InstrumentCacheWrite {
   path: string;

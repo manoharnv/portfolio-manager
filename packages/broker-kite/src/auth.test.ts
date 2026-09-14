@@ -46,6 +46,15 @@ describe('loginUrl', () => {
       'https://kite.zerodha.com/connect/login?v=3&api_key=a%20key%2Fb',
     );
   });
+
+  it('carries redirect params as one URL-encoded query string, per the Kite docs', () => {
+    expect(loginUrl('my_key', { redirectParams: { state: 'n 1', x: 'a&b' } })).toBe(
+      'https://kite.zerodha.com/connect/login?v=3&api_key=my_key&redirect_params=state%3Dn%2B1%26x%3Da%2526b',
+    );
+    expect(loginUrl('my_key', { redirectParams: {} })).toBe(
+      'https://kite.zerodha.com/connect/login?v=3&api_key=my_key',
+    );
+  });
 });
 
 describe('nextSixAmIst', () => {

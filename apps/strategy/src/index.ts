@@ -20,7 +20,7 @@ import { DhanInstrumentMaster, createDhanReadAdapter } from '@pm/broker-dhan';
 import { KiteInstrumentMaster, createKiteReadAdapter } from '@pm/broker-kite';
 import type { Broker, BrokerCreds, BrokerReadAdapter, Segment } from '@pm/core';
 import { createLogger } from './logger.js';
-import { readEnv } from './env.js';
+import { instrumentSource, readEnv, type EngineEnv } from './env.js';
 import { readInstrumentsSource } from './instruments-source.js';
 import { runTick, type HarnessDeps } from './harness.js';
 import { TICKS, type Tick } from './types.js';
@@ -58,9 +58,9 @@ function message(err: unknown): string {
 }
 
 /**
- * The instrument master is loaded once, at start-up, for the broker the
- * credentials name at that moment: the two brokers' masters are different
- * files and `PM_INSTRUMENTS_URL` points at one of them.
+ * A broker's parsed instrument master. The two brokers' masters are different
+ * files; with `PM_INSTRUMENTS_DIR` the engine can load either on demand, with
+ * only `PM_INSTRUMENTS_URL` it is pinned to one broker.
  */
 type LoadedMaster =
   | { broker: 'dhan'; instruments: DhanInstrumentMaster }
@@ -68,12 +68,12 @@ type LoadedMaster =
 
 async function loadMaster(
   broker: Broker,
-  instrumentsUrl: string,
+  source: string,
   segments: readonly Segment[],
   now: Date,
 ): Promise<LoadedMaster> {
   // file:// on the VM (the backend's local cache), http(s):// for local runs.
-  const csv = await readInstrumentsSource(instrumentsUrl);
+  const csv = await readInstrumentsSource(source);
   if (broker === 'dhan') {
     const instruments = new DhanInstrumentMaster();
     instruments.loadFromCsv(csv, now, { segments });
@@ -91,10 +91,11 @@ function buildReadAdapter(creds: BrokerCreds, master: LoadedMaster): BrokerReadA
     : createKiteReadAdapter(creds, { instruments: master.instruments });
 }
 
-/** The credentials as last read from Secret Manager, and the adapter built from them. */
+/** The credentials as last read from Secret Manager, and what was built from them. */
 interface BrokerHandle {
   raw: string;
   creds: BrokerCreds;
+  master: LoadedMaster;
   read: BrokerReadAdapter;
 }
 
@@ -113,22 +114,21 @@ function parseCreds(raw: string): BrokerCreds {
  * and this process must not run the day on yesterday's token. One small
  * Secret Manager read per tick; nothing is rebuilt when nothing changed.
  *
- * Fail closed on trouble (docs/00 §0.7): a read or parse error keeps the
- * previous credentials — whose session check refuses ticks once they expire —
- * and a switch to the broker whose instrument master this process did NOT load
- * is refused with an error: the unit has to be restarted with the matching
- * `PM_INSTRUMENTS_URL`.
+ * A switch to the other broker loads that broker's master from
+ * `PM_INSTRUMENTS_DIR`; with only `PM_INSTRUMENTS_URL` the switch is refused.
+ *
+ * Fail closed on trouble (docs/00 §0.7): a read, parse or load error keeps the
+ * previous credentials — whose session check refuses ticks once they expire.
  */
 async function refreshBroker(
   previous: BrokerHandle,
-  secretName: string,
-  master: LoadedMaster,
+  env: EngineEnv,
   logger: HarnessDeps['logger'],
 ): Promise<BrokerHandle> {
   let raw: string;
   let creds: BrokerCreds;
   try {
-    raw = await loadSecret(secretName);
+    raw = await loadSecret(env.brokerSecret);
     if (raw === previous.raw) return previous;
     creds = parseCreds(raw);
   } catch (err) {
@@ -138,19 +138,42 @@ async function refreshBroker(
     );
     return previous;
   }
+
+  let master = previous.master;
   if (creds.broker !== master.broker) {
-    logger.error(
-      { loaded: master.broker, wanted: creds.broker },
-      "active broker changed but this process loaded the other broker's instrument master — restart pm-strategy with the matching PM_INSTRUMENTS_URL; keeping the previous credentials",
-    );
-    return previous;
+    if (env.instrumentsDir === undefined) {
+      logger.error(
+        { loaded: master.broker, wanted: creds.broker },
+        "active broker changed but this process is pinned to the other broker's instrument master (PM_INSTRUMENTS_URL) — set PM_INSTRUMENTS_DIR or restart pm-strategy; keeping the previous credentials",
+      );
+      return previous;
+    }
+    try {
+      master = await loadMaster(
+        creds.broker,
+        instrumentSource(env, creds.broker),
+        env.segments,
+        new Date(),
+      );
+      logger.info(
+        { broker: creds.broker, segments: env.segments, size: master.instruments.size },
+        'instrument master indexed for the new active broker',
+      );
+    } catch (err) {
+      logger.error(
+        { broker: creds.broker, err: message(err) },
+        "could not load the new active broker's instrument master — keeping the previous credentials",
+      );
+      return previous;
+    }
   }
+
   const read = buildReadAdapter(creds, master);
   logger.info(
     { broker: creds.broker, expiresAt: creds[creds.broker]?.expiresAt },
     'broker credentials refreshed',
   );
-  return { raw, creds, read };
+  return { raw, creds, master, read };
 }
 
 type BaseDeps = Omit<HarnessDeps, 'read' | 'portfolio' | 'market' | 'sessions'>;
@@ -185,7 +208,12 @@ export async function main(): Promise<void> {
   const startedAt = new Date();
   const initialRaw = await loadSecret(env.brokerSecret);
   const initialCreds = parseCreds(initialRaw);
-  const master = await loadMaster(initialCreds.broker, env.instrumentsUrl, env.segments, startedAt);
+  const master = await loadMaster(
+    initialCreds.broker,
+    instrumentSource(env, initialCreds.broker),
+    env.segments,
+    startedAt,
+  );
   logger.info(
     { broker: initialCreds.broker, segments: env.segments, size: master.instruments.size },
     'instrument master indexed',
@@ -193,6 +221,7 @@ export async function main(): Promise<void> {
   let broker: BrokerHandle = {
     raw: initialRaw,
     creds: initialCreds,
+    master,
     read: buildReadAdapter(initialCreds, master),
   };
   logger.info(
@@ -220,7 +249,7 @@ export async function main(): Promise<void> {
     clock: base.clock,
     logger,
     resolveDeps: async (): Promise<HarnessDeps> => {
-      broker = await refreshBroker(broker, env.brokerSecret, master, logger);
+      broker = await refreshBroker(broker, env, logger);
       return withBroker(base, broker.read);
     },
   };

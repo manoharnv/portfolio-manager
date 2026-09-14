@@ -1,26 +1,31 @@
 /**
  * Broker session lifecycle — docs/04 §4.6, docs/02 §2.8.
  *
- * The backend owns the credentials end-to-end.
+ * The backend owns the credentials end-to-end, and for BOTH brokers the daily
+ * login finishes on this backend, never in the app:
  *
- * Kite: the app opens the connect URL, Kite redirects into the app with a
- * short-lived `request_token`, the app POSTs it to `/v1/auth/kite/callback`
- * and the exchange with the api_secret happens here.
+ *   1. `loginUrl` starts a login and remembers it as *the* pending login. Dhan:
+ *      a consent is generated with the api key/secret. Kite: a `state` nonce
+ *      is minted and carried in Kite's `redirect_params`.
+ *   2. The user signs in on the broker's own page in the system browser.
+ *   3. The broker redirects to `GET /v1/auth/:broker/redirect` here —
+ *      `completeRedirect` — which exchanges what the redirect carries
+ *      (`tokenId` / `request_token`) for the day's access token, checks the
+ *      account that signed in is the configured one, stores the token, and the
+ *      route bounces the browser to the app with a status.
  *
- * Dhan: nothing passes through the app at all. `loginUrl` generates a consent
- * with the api key/secret; the user signs in on Dhan's page in the system
- * browser; Dhan redirects **to this backend** (`GET /v1/auth/dhan/redirect
- * ?tokenId=…`), which consumes the consent (`completeDhanRedirect`), checks the
- * account is the configured one, and only then bounces the browser to the app
- * with a status. That redirect is unauthenticated by nature (it is Dhan's page,
- * not the app, that sends it), so it is only honoured while a login this
- * backend itself started is pending.
+ * That redirect is unauthenticated by nature (the broker's page sends it), so
+ * it is honoured only while a login this backend itself started is pending,
+ * within a short TTL, and — for Kite — with the state nonce echoed back.
  *
- * Either way the daily access token goes straight to Secret Manager; Firestore
- * only ever sees the expiry. After a login the strategy engine's read-creds
- * secret is brought up to date too (services/strategy-creds.ts).
+ * `completeLogin` (`POST /v1/auth/kite/callback`) remains for a client that
+ * received Kite's `request_token` directly; Dhan tokens are never accepted
+ * from a client. The daily access token goes straight to Secret Manager;
+ * Firestore only ever sees the expiry. After a login the strategy engine's
+ * read-creds secret is brought up to date too (services/strategy-creds.ts).
  */
 
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { IsoDateTimeSchema } from '@pm/core';
 import type { Broker, SessionStatus } from '@pm/core';
@@ -39,11 +44,11 @@ import type { StrategyCredsSync } from './strategy-creds.js';
 export const BROKERS: readonly Broker[] = ['dhan', 'kite'];
 
 /**
- * How long a started Dhan login stays redeemable. Long enough for a login +
- * OTP on a slow evening, short enough that a stale consent cannot be replayed
- * against this backend a day later.
+ * How long a started login stays redeemable. Long enough for a login + OTP on
+ * a slow evening, short enough that a stale consent or request token cannot
+ * be replayed against this backend a day later.
  */
-export const DHAN_CONSENT_TTL_MS = 15 * 60 * 1000;
+export const LOGIN_TTL_MS = 15 * 60 * 1000;
 
 export interface BrokerSessionView extends SessionStatus {
   /** `true` when an order placed right now would be refused for session reasons. */
@@ -70,19 +75,30 @@ export type CompleteLoginResult =
       detail: string;
     };
 
-export type DhanRedirectResult =
-  | { ok: true; broker: 'dhan'; uid: string; connected: true; expiresAt: string }
+/** The broker's redirect, query string as key → first value. */
+export type RedirectQuery = Readonly<Record<string, string | undefined>>;
+
+export type RedirectResult =
+  | { ok: true; broker: Broker; uid: string; connected: true; expiresAt: string }
   | {
       ok: false;
-      reason: 'NO_PENDING_LOGIN' | 'SECRET_MISSING' | 'EXCHANGE_FAILED' | 'CLIENT_MISMATCH';
+      reason:
+        | 'NO_PENDING_LOGIN'
+        | 'INVALID_REQUEST'
+        | 'STATE_MISMATCH'
+        | 'SECRET_MISSING'
+        | 'EXCHANGE_FAILED'
+        | 'CLIENT_MISMATCH';
       detail: string;
     };
 
-/** A Dhan login this backend started and has not yet seen come back. */
-export interface PendingConsent {
+/** A login this backend started and has not yet seen come back. */
+export interface PendingLogin {
   uid: string;
-  consentAppId: string;
-  /** ISO — when `loginUrl` generated it. */
+  broker: Broker;
+  /** Nonce; carried through Kite's `redirect_params`, kept private for Dhan. */
+  state: string;
+  /** ISO — when `loginUrl` started it. */
   startedAt: string;
 }
 
@@ -92,14 +108,14 @@ export interface PendingConsent {
  * uid that started it. Memory-only on purpose — a restart mid-login simply
  * means "tap Connect again".
  */
-export interface PendingConsentStore {
-  get(): PendingConsent | undefined;
-  set(pending: PendingConsent): void;
+export interface PendingLoginStore {
+  get(): PendingLogin | undefined;
+  set(pending: PendingLogin): void;
   clear(): void;
 }
 
-export function createMemoryPendingConsentStore(): PendingConsentStore {
-  let slot: PendingConsent | undefined;
+export function createMemoryPendingLoginStore(): PendingLoginStore {
+  let slot: PendingLogin | undefined;
   return {
     get: () => slot,
     set: (pending) => {
@@ -130,9 +146,16 @@ export interface SessionDeps {
   secretNames: { dhan: BrokerSecretNames; kite: BrokerSecretNames };
   /** Used to report which broker the session checks are graded against. */
   activeBrokerFor(uid: string): Promise<Broker | undefined>;
+  /**
+   * The Zerodha client id a Kite login must belong to (`KITE_USER_ID`). Blank
+   * ⇒ any account that completes the login is accepted, with a warning.
+   */
+  kiteUserId?: string | undefined;
   /** Keeps the strategy engine's read-creds secret current; optional in tests. */
   strategyCreds?: StrategyCredsSync | undefined;
-  pendingConsent?: PendingConsentStore | undefined;
+  pendingLogin?: PendingLoginStore | undefined;
+  /** State nonce source; injected in tests. */
+  nonce?: (() => string) | undefined;
   logger?: Logger | undefined;
   /** Overrides Kite's base URL in tests. */
   kiteBaseUrl?: string | undefined;
@@ -144,15 +167,16 @@ export interface SessionService {
   status(uid: string): Promise<SessionStatusResult>;
   loginUrl(uid: string, broker: Broker): Promise<LoginUrlResult>;
   completeLogin(uid: string, broker: Broker, payload: unknown): Promise<CompleteLoginResult>;
-  /** `GET /v1/auth/dhan/redirect?tokenId=…` — Dhan's browser redirect. */
-  completeDhanRedirect(tokenId: string): Promise<DhanRedirectResult>;
+  /** `GET /v1/auth/:broker/redirect` — the broker's browser redirect. */
+  completeRedirect(broker: Broker, query: RedirectQuery): Promise<RedirectResult>;
 }
 
 type SecretMissing = { ok: false; reason: 'SECRET_MISSING'; detail: string };
 
 export function createSessionService(deps: SessionDeps): SessionService {
   const names = (broker: Broker): BrokerSecretNames => deps.secretNames[broker];
-  const pending = deps.pendingConsent ?? createMemoryPendingConsentStore();
+  const pending = deps.pendingLogin ?? createMemoryPendingLoginStore();
+  const nonce = deps.nonce ?? ((): string => randomUUID());
 
   /** All named secrets, or one SECRET_MISSING naming the absent ones. */
   async function requireSecrets<K extends string>(
@@ -215,6 +239,166 @@ export function createSessionService(deps: SessionDeps): SessionService {
     }
   }
 
+  async function exchangeKite(
+    requestToken: string,
+  ): Promise<
+    | { ok: true; apiKey: string; accessToken: string; userId: string; expiresAt: string }
+    | SecretMissing
+    | { ok: false; reason: 'EXCHANGE_FAILED'; detail: string }
+  > {
+    const got = await requireSecrets({
+      apiKey: names('kite').apiKey,
+      apiSecret: names('kite').apiSecret,
+    });
+    if ('ok' in got) return got;
+    try {
+      const exchanged = await exchangeRequestToken(
+        deps.http,
+        { apiKey: got.apiKey, apiSecret: got.apiSecret, requestToken },
+        deps.clock.now(),
+        deps.kiteBaseUrl,
+      );
+      return {
+        ok: true,
+        apiKey: got.apiKey,
+        accessToken: exchanged.accessToken,
+        userId: exchanged.userId,
+        expiresAt: exchanged.expiresAt,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: 'EXCHANGE_FAILED',
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  async function completeKiteRedirect(
+    inFlight: PendingLogin,
+    query: RedirectQuery,
+  ): Promise<RedirectResult> {
+    const requestToken = query['request_token'] ?? query['requestToken'];
+    if (requestToken === undefined || requestToken === '') {
+      return {
+        ok: false,
+        reason: 'INVALID_REQUEST',
+        detail: 'Kite redirected without a request_token — tap Connect and try again',
+      };
+    }
+    // Only Kite's own redirect of THIS login echoes the nonce. A forged hit
+    // must not spend the genuine pending login, so nothing is cleared here.
+    if (query['state'] !== inFlight.state) {
+      deps.logger?.warn({ broker: 'kite' }, 'kite redirect without the expected state nonce');
+      return {
+        ok: false,
+        reason: 'STATE_MISMATCH',
+        detail: 'the Kite redirect did not belong to the login this app started',
+      };
+    }
+
+    const exchanged = await exchangeKite(requestToken);
+    if (!exchanged.ok) return exchanged;
+
+    const expected = deps.kiteUserId ?? '';
+    if (expected === '') {
+      deps.logger?.warn(
+        { userId: exchanged.userId },
+        'KITE_USER_ID is not set — accepting whichever Zerodha account completed the login',
+      );
+    } else if (exchanged.userId !== expected) {
+      pending.clear();
+      deps.logger?.warn(
+        { expected, got: exchanged.userId },
+        'kite login completed by a different Zerodha account — refused',
+      );
+      return {
+        ok: false,
+        reason: 'CLIENT_MISMATCH',
+        detail: 'the Zerodha account that signed in is not the one configured for this backend',
+      };
+    }
+
+    pending.clear();
+    await persistLogin(inFlight.uid, 'kite', exchanged.accessToken, exchanged.expiresAt, {
+      kite: { apiKey: exchanged.apiKey },
+    });
+    return {
+      ok: true,
+      broker: 'kite',
+      uid: inFlight.uid,
+      connected: true,
+      expiresAt: exchanged.expiresAt,
+    };
+  }
+
+  async function completeDhanRedirect(
+    inFlight: PendingLogin,
+    query: RedirectQuery,
+    now: Date,
+  ): Promise<RedirectResult> {
+    const tokenId = query['tokenId'];
+    if (tokenId === undefined || tokenId === '') {
+      return {
+        ok: false,
+        reason: 'INVALID_REQUEST',
+        detail: 'Dhan redirected without a tokenId — tap Connect and try again',
+      };
+    }
+
+    const got = await requireSecrets({
+      apiKey: names('dhan').apiKey,
+      apiSecret: names('dhan').apiSecret,
+      clientId: names('dhan').clientId,
+    });
+    if ('ok' in got) return got;
+
+    let consumed;
+    try {
+      consumed = await consumeConsent(
+        deps.dhanHttp,
+        { apiKey: got.apiKey, apiSecret: got.apiSecret },
+        tokenId,
+        { authBaseUrl: deps.dhanAuthBaseUrl, now },
+      );
+    } catch (err) {
+      // The consent (if it was one) is spent either way; the pending slot
+      // stays so a genuine retry within the TTL still works.
+      return {
+        ok: false,
+        reason: 'EXCHANGE_FAILED',
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    // A consent is generated for the configured client id, but never trust
+    // that alone: the account that actually signed in must be that client.
+    if (consumed.clientId !== got.clientId) {
+      pending.clear();
+      deps.logger?.warn(
+        { expected: got.clientId, got: consumed.clientId },
+        'dhan consent completed by a different client id — refused',
+      );
+      return {
+        ok: false,
+        reason: 'CLIENT_MISMATCH',
+        detail: 'the Dhan account that signed in is not the one configured for this backend',
+      };
+    }
+
+    pending.clear();
+    await persistLogin(inFlight.uid, 'dhan', consumed.accessToken, consumed.expiresAt, {
+      dhan: { clientId: consumed.clientId },
+    });
+    return {
+      ok: true,
+      broker: 'dhan',
+      uid: inFlight.uid,
+      connected: true,
+      expiresAt: consumed.expiresAt,
+    };
+  }
+
   return {
     async status(uid: string): Promise<SessionStatusResult> {
       const now = deps.clock.now();
@@ -233,10 +417,19 @@ export function createSessionService(deps: SessionDeps): SessionService {
     },
 
     async loginUrl(uid: string, broker: Broker): Promise<LoginUrlResult> {
+      const state = nonce();
+      const startedAt = deps.clock.now().toISOString();
+
       if (broker === 'kite') {
         const got = await requireSecrets({ apiKey: names('kite').apiKey });
         if ('ok' in got) return got;
-        return { ok: true, broker, url: kiteLoginUrl(got.apiKey), verifyLive: false };
+        pending.set({ uid, broker, state, startedAt });
+        return {
+          ok: true,
+          broker,
+          url: kiteLoginUrl(got.apiKey, { redirectParams: { state } }),
+          verifyLive: false,
+        };
       }
 
       const got = await requireSecrets({
@@ -252,11 +445,7 @@ export function createSessionService(deps: SessionDeps): SessionService {
           got.clientId,
           { authBaseUrl: deps.dhanAuthBaseUrl },
         );
-        pending.set({
-          uid,
-          consentAppId: started.consentAppId,
-          startedAt: deps.clock.now().toISOString(),
-        });
+        pending.set({ uid, broker, state, startedAt });
         return { ok: true, broker, url: started.loginUrl, verifyLive: false };
       } catch (err) {
         return {
@@ -289,105 +478,36 @@ export function createSessionService(deps: SessionDeps): SessionService {
       if (!parsed.success) {
         return { ok: false, reason: 'INVALID_PAYLOAD', detail: 'expected { requestToken }' };
       }
-      const got = await requireSecrets({
-        apiKey: names('kite').apiKey,
-        apiSecret: names('kite').apiSecret,
+      const exchanged = await exchangeKite(parsed.data.requestToken);
+      if (!exchanged.ok) return exchanged;
+
+      await persistLogin(uid, 'kite', exchanged.accessToken, exchanged.expiresAt, {
+        kite: { apiKey: exchanged.apiKey },
       });
-      if ('ok' in got) return got;
-
-      let accessToken: string;
-      let expiresAt: string;
-      try {
-        const exchanged = await exchangeRequestToken(
-          deps.http,
-          { apiKey: got.apiKey, apiSecret: got.apiSecret, requestToken: parsed.data.requestToken },
-          deps.clock.now(),
-          deps.kiteBaseUrl,
-        );
-        accessToken = exchanged.accessToken;
-        expiresAt = exchanged.expiresAt;
-      } catch (err) {
-        return {
-          ok: false,
-          reason: 'EXCHANGE_FAILED',
-          detail: err instanceof Error ? err.message : String(err),
-        };
-      }
-
-      await persistLogin(uid, 'kite', accessToken, expiresAt, { kite: { apiKey: got.apiKey } });
-      return { ok: true, broker, connected: true, expiresAt };
+      return { ok: true, broker, connected: true, expiresAt: exchanged.expiresAt };
     },
 
-    async completeDhanRedirect(tokenId: string): Promise<DhanRedirectResult> {
+    async completeRedirect(broker: Broker, query: RedirectQuery): Promise<RedirectResult> {
       const now = deps.clock.now();
       const inFlight = pending.get();
-      if (inFlight === undefined) {
+      if (inFlight === undefined || inFlight.broker !== broker) {
         return {
           ok: false,
           reason: 'NO_PENDING_LOGIN',
-          detail: 'no Dhan login was started from the app — tap Connect and try again',
+          detail: `no ${broker} login was started from the app — tap Connect and try again`,
         };
       }
-      if (now.getTime() - Date.parse(inFlight.startedAt) > DHAN_CONSENT_TTL_MS) {
+      if (now.getTime() - Date.parse(inFlight.startedAt) > LOGIN_TTL_MS) {
         pending.clear();
         return {
           ok: false,
           reason: 'NO_PENDING_LOGIN',
-          detail: 'the Dhan login took too long — tap Connect and try again',
+          detail: `the ${broker} login took too long — tap Connect and try again`,
         };
       }
-
-      const got = await requireSecrets({
-        apiKey: names('dhan').apiKey,
-        apiSecret: names('dhan').apiSecret,
-        clientId: names('dhan').clientId,
-      });
-      if ('ok' in got) return got;
-
-      let consumed;
-      try {
-        consumed = await consumeConsent(
-          deps.dhanHttp,
-          { apiKey: got.apiKey, apiSecret: got.apiSecret },
-          tokenId,
-          { authBaseUrl: deps.dhanAuthBaseUrl, now },
-        );
-      } catch (err) {
-        // The consent (if it was one) is spent either way; the pending slot
-        // stays so a genuine retry within the TTL still works.
-        return {
-          ok: false,
-          reason: 'EXCHANGE_FAILED',
-          detail: err instanceof Error ? err.message : String(err),
-        };
-      }
-
-      // A consent is generated for the configured client id, but never trust
-      // that alone: the account that actually signed in must be that client.
-      if (consumed.clientId !== got.clientId) {
-        pending.clear();
-        deps.logger?.warn(
-          { expected: got.clientId, got: consumed.clientId },
-          'dhan consent completed by a different client id — refused',
-        );
-        return {
-          ok: false,
-          reason: 'CLIENT_MISMATCH',
-          detail: 'the Dhan account that signed in is not the one configured for this backend',
-        };
-      }
-
-      pending.clear();
-      await persistLogin(inFlight.uid, 'dhan', consumed.accessToken, consumed.expiresAt, {
-        dhan: { clientId: consumed.clientId },
-      });
-      return {
-        ok: true,
-        broker: 'dhan',
-        uid: inFlight.uid,
-        connected: true,
-        expiresAt: consumed.expiresAt,
-      };
+      return broker === 'kite'
+        ? completeKiteRedirect(inFlight, query)
+        : completeDhanRedirect(inFlight, query, now);
     },
   };
 }

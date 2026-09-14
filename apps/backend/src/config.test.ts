@@ -68,6 +68,11 @@ describe('parseConfig', () => {
     ).toMatchObject({ strategyReadCredsSecret: 'other', appCallbackUrl: 'pmdev://cb' });
   });
 
+  it('leaves the Kite user id unchecked unless configured', () => {
+    expect(parseConfig({}).kiteUserId).toBe('');
+    expect(parseConfig({ KITE_USER_ID: 'AB1234' }).kiteUserId).toBe('AB1234');
+  });
+
   it('indexes only equities by default and validates INSTRUMENT_SEGMENTS', () => {
     expect(parseConfig({}).instrumentSegments).toEqual(['EQ']);
     expect(parseConfig({ INSTRUMENT_SEGMENTS: ' EQ, FNO ' }).instrumentSegments).toEqual([

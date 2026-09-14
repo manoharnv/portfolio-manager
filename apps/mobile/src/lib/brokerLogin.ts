@@ -6,13 +6,14 @@
  * has the api key) and opens it in the system auth session. What comes back in
  * the redirect decides the rest:
  *
- *   - Kite redirects into the app with a short-lived `request_token`; it is
- *     POSTed straight to `/v1/auth/kite/callback` and dropped.
- *   - Dhan never redirects into the app at all: its login page sends the
- *     browser to the backend (`GET /v1/auth/dhan/redirect`), which does the
- *     exchange itself and only then bounces the browser here with
- *     `?status=ok&expiresAt=…` or `?status=error&reason=…`. The app just reads
- *     the verdict.
+ *   - Both brokers' login pages send the browser to the backend
+ *     (`GET /v1/auth/:broker/redirect` — Kite requires an http(s) redirect URL
+ *     anyway), which does the exchange itself and only then bounces the browser
+ *     here with `?status=ok&expiresAt=…` or `?status=error&reason=…`. The app
+ *     just reads the verdict.
+ *   - Should a redirect ever land in the app directly with a short-lived Kite
+ *     `request_token`, it is POSTed straight to `/v1/auth/kite/callback` and
+ *     dropped.
  *
  * Nothing is written to SecureStore, AsyncStorage or a log on the way through.
  */
@@ -50,8 +51,7 @@ export function extractRequestToken(redirectUrl: string): string | undefined {
 }
 
 export type ServerCompletion =
-  | { status: 'ok'; expiresAt: string }
-  | { status: 'error'; reason: string };
+  { status: 'ok'; expiresAt: string } | { status: 'error'; reason: string };
 
 /**
  * A login the backend finished by itself (Dhan): the redirect carries the
@@ -79,13 +79,15 @@ export function describeServerReason(reason: string): string {
     case 'NO_PENDING_LOGIN':
       return 'the login took too long or was not started from this app — tap Connect and try again';
     case 'CLIENT_MISMATCH':
-      return 'the Dhan account that signed in is not the one configured for this backend';
+      return 'the broker account that signed in is not the one configured for this backend';
+    case 'STATE_MISMATCH':
+      return 'the broker reply did not belong to the login this app started — tap Connect and try again';
     case 'EXCHANGE_FAILED':
-      return 'Dhan did not accept the consent — try again';
+      return 'the broker did not accept the login — try again';
     case 'SECRET_MISSING':
-      return 'the backend has no Dhan API key, secret or client id configured';
+      return 'the backend has no API key / secret configured for this broker';
     case 'INVALID_REQUEST':
-      return 'Dhan redirected without a token id — try again';
+      return 'the broker redirected without a login token — try again';
     default:
       return `the broker login failed (${reason})`;
   }

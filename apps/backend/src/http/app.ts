@@ -6,10 +6,11 @@
  * code path a real request would.
  *
  * Security posture baked in here:
- *   - `/health` and Dhan's consent redirect (`GET /v1/auth/dhan/redirect`, sent
- *     by Dhan's login page, not by the app) are the ONLY unauthenticated routes;
- *     the redirect is still rate-limited by IP and only honoured while a login
- *     this backend started is pending (services/session.ts).
+ *   - `/health` and the brokers' login redirects (`GET /v1/auth/:broker/redirect`,
+ *     sent by the broker's login page, not by the app) are the ONLY
+ *     unauthenticated routes; the redirects are still rate-limited by IP and
+ *     only honoured while a login this backend started is pending
+ *     (services/session.ts).
  *   - Every other route: `Authorization: Bearer <Firebase ID token>` → uid, then
  *     an `ALLOWED_UIDS` allowlist check (empty list ⇒ 403 for everyone).
  *   - Per-uid rate limit, hard-capped well below broker OPS limits.
@@ -64,10 +65,14 @@ export interface AppDeps {
   clock: Clock;
 }
 
-export const DHAN_REDIRECT_PATH = '/v1/auth/dhan/redirect';
+/** The brokers' browser redirects — sent by their login pages, not by the app. */
+export const REDIRECT_PATHS: ReadonlySet<string> = new Set([
+  '/v1/auth/dhan/redirect',
+  '/v1/auth/kite/redirect',
+]);
 
 /** The routes that answer without a token. */
-export const PUBLIC_PATHS: ReadonlySet<string> = new Set(['/health', DHAN_REDIRECT_PATH]);
+export const PUBLIC_PATHS: ReadonlySet<string> = new Set(['/health', ...REDIRECT_PATHS]);
 /** The routes exempt from the rate limit — the redirect is NOT one of them. */
 const UNMETERED_PATHS: ReadonlySet<string> = new Set(['/health']);
 
@@ -82,7 +87,18 @@ export function appCallbackUrl(base: string, params: Record<string, string>): st
 }
 
 const BrokerParamSchema = z.object({ broker: z.enum(['dhan', 'kite']) });
-const DhanRedirectQuerySchema = z.object({ tokenId: z.string().min(1).max(512) });
+
+/** The redirect's query string as key → first value; anything odd is dropped. */
+function stringQuery(raw: unknown): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {};
+  if (typeof raw !== 'object' || raw === null) return out;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'string') out[key] = value.slice(0, 512);
+    else if (Array.isArray(value) && typeof value[0] === 'string')
+      out[key] = value[0].slice(0, 512);
+  }
+  return out;
+}
 const IdParamSchema = z.object({ id: z.string().min(1) });
 
 const ExecuteBodySchema = z.object({
@@ -252,34 +268,39 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   /**
-   * Dhan's consent redirect (docs/02 §2.8). Dhan's login page sends the user's
-   * browser here with `?tokenId=`; the exchange happens server-side and the
+   * The brokers' login redirects (docs/02 §2.8). The broker's login page sends
+   * the user's browser here — Dhan with `?tokenId=`, Kite with
+   * `?request_token=…&state=…` — the exchange happens server-side and the
    * browser is then bounced to the app's callback URL with a status. Whatever
-   * happens, the token never appears in this response, the URL or a log —
-   * and the browser is always sent back to the app, never left on an error
-   * page it cannot act on.
+   * happens, the token never appears in this response, the URL or a log — and
+   * the browser is always sent back to the app, never left on an error page
+   * it cannot act on.
    */
-  app.get(DHAN_REDIRECT_PATH, async (request, reply) => {
-    const bounce = (params: Record<string, string>): FastifyReply =>
-      reply.redirect(appCallbackUrl(deps.config.appCallbackUrl, { broker: 'dhan', ...params }), 302);
+  app.get('/v1/auth/:broker/redirect', async (request, reply) => {
+    const params = BrokerParamSchema.safeParse(request.params);
+    if (!params.success) return reply.code(404).send(failureBody('NOT_FOUND', 'no such route'));
+    const broker = params.data.broker;
+    const bounce = (extra: Record<string, string>): FastifyReply =>
+      reply.redirect(appCallbackUrl(deps.config.appCallbackUrl, { broker, ...extra }), 302);
 
-    const query = DhanRedirectQuerySchema.safeParse(request.query);
-    if (!query.success) {
-      deps.logger.warn({ path: DHAN_REDIRECT_PATH }, 'dhan consent redirect without a usable tokenId');
-      return bounce({ status: 'error', reason: 'INVALID_REQUEST' });
-    }
     try {
-      const result = await deps.services.session.completeDhanRedirect(query.data.tokenId);
+      const result = await deps.services.session.completeRedirect(
+        broker,
+        stringQuery(request.query),
+      );
       if (!result.ok) {
-        deps.logger.warn({ reason: result.reason }, 'dhan consent redirect refused');
+        deps.logger.warn({ broker, reason: result.reason }, 'broker login redirect refused');
         return bounce({ status: 'error', reason: result.reason });
       }
-      deps.logger.info({ expiresAt: result.expiresAt }, 'dhan session connected via consent');
+      deps.logger.info(
+        { broker, expiresAt: result.expiresAt },
+        'broker session connected via redirect',
+      );
       return bounce({ status: 'ok', expiresAt: result.expiresAt });
     } catch (err) {
       deps.logger.error(
-        { err: err instanceof Error ? err.message : String(err) },
-        'dhan consent redirect failed',
+        { broker, err: err instanceof Error ? err.message : String(err) },
+        'broker login redirect failed',
       );
       return bounce({ status: 'error', reason: 'INTERNAL' });
     }

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { HttpClient, HttpRequest, HttpResponse } from '@pm/broker-kite';
 import { createAuditWriter } from './audit.js';
-import { DHAN_CONSENT_TTL_MS, createSessionService, type SessionService } from './session.js';
+import { LOGIN_TTL_MS, createSessionService, type SessionService } from './session.js';
 import { createStrategyCredsSync } from './strategy-creds.js';
 
 const STRATEGY_SECRET = 'pm-strategy-read-creds';
@@ -92,6 +92,8 @@ function harness(): Harness {
     dhanHttp: http,
     secretNames: makeBackendConfig().secrets,
     activeBrokerFor: () => Promise.resolve('dhan'),
+    kiteUserId: 'AB1234',
+    nonce: () => 'nonce-1',
     strategyCreds: createStrategyCredsSync({ secrets, secretName: STRATEGY_SECRET }),
     kiteBaseUrl: 'https://kite.test/v3',
     dhanAuthBaseUrl: 'https://auth.dhan.test',
@@ -138,10 +140,11 @@ describe('status', () => {
 });
 
 describe('loginUrl', () => {
-  it('builds the Kite connect URL from the stored api key', async () => {
+  it('builds the Kite connect URL from the stored api key, carrying the state nonce', async () => {
     const result = await h.service.loginUrl('u1', 'kite');
     expect(result).toMatchObject({ ok: true, verifyLive: false });
     expect((result as { url: string }).url).toContain('api_key=kite-key');
+    expect((result as { url: string }).url).toContain('redirect_params=state%3Dnonce-1');
   });
 
   it('generates a Dhan consent with the app secrets and returns its login URL', async () => {
@@ -265,14 +268,14 @@ describe('completeLogin — dhan', () => {
   });
 });
 
-describe('completeDhanRedirect', () => {
+describe('completeRedirect — dhan', () => {
   async function startLogin(): Promise<void> {
     h.http.responses.push(CONSENT_STARTED);
     expect(await h.service.loginUrl('u1', 'dhan')).toMatchObject({ ok: true });
   }
 
   it('refuses a redirect when no login is pending — nothing is sent to Dhan', async () => {
-    expect(await h.service.completeDhanRedirect('tok-1')).toMatchObject({
+    expect(await h.service.completeRedirect('dhan', { tokenId: 'tok-1' })).toMatchObject({
       ok: false,
       reason: 'NO_PENDING_LOGIN',
     });
@@ -283,7 +286,7 @@ describe('completeDhanRedirect', () => {
     await startLogin();
     h.http.responses.push(CONSENT_CONSUMED);
 
-    const result = await h.service.completeDhanRedirect('tok-1');
+    const result = await h.service.completeRedirect('dhan', { tokenId: 'tok-1' });
 
     expect(result).toEqual({
       ok: true,
@@ -317,9 +320,9 @@ describe('completeDhanRedirect', () => {
   it('is single-use: a second redirect after success is refused', async () => {
     await startLogin();
     h.http.responses.push(CONSENT_CONSUMED);
-    await h.service.completeDhanRedirect('tok-1');
+    await h.service.completeRedirect('dhan', { tokenId: 'tok-1' });
 
-    expect(await h.service.completeDhanRedirect('tok-2')).toMatchObject({
+    expect(await h.service.completeRedirect('dhan', { tokenId: 'tok-2' })).toMatchObject({
       ok: false,
       reason: 'NO_PENDING_LOGIN',
     });
@@ -337,7 +340,7 @@ describe('completeDhanRedirect', () => {
       }),
     });
 
-    expect(await h.service.completeDhanRedirect('tok-1')).toMatchObject({
+    expect(await h.service.completeRedirect('dhan', { tokenId: 'tok-1' })).toMatchObject({
       ok: false,
       reason: 'CLIENT_MISMATCH',
     });
@@ -345,7 +348,7 @@ describe('completeDhanRedirect', () => {
     expect(await h.sessions.get('u1', 'dhan')).toBeUndefined();
     expect(h.secrets.docs.has(STRATEGY_SECRET)).toBe(false);
     // The spent login cannot be retried against a fresh consent from an attacker.
-    expect(await h.service.completeDhanRedirect('tok-1')).toMatchObject({
+    expect(await h.service.completeRedirect('dhan', { tokenId: 'tok-1' })).toMatchObject({
       reason: 'NO_PENDING_LOGIN',
     });
   });
@@ -357,19 +360,21 @@ describe('completeDhanRedirect', () => {
       headers: {},
       bodyText: JSON.stringify({ errorCode: 'DH-901', errorMessage: 'invalid token' }),
     });
-    expect(await h.service.completeDhanRedirect('bad')).toMatchObject({
+    expect(await h.service.completeRedirect('dhan', { tokenId: 'bad' })).toMatchObject({
       ok: false,
       reason: 'EXCHANGE_FAILED',
     });
 
     h.http.responses.push(CONSENT_CONSUMED);
-    expect(await h.service.completeDhanRedirect('tok-1')).toMatchObject({ ok: true });
+    expect(await h.service.completeRedirect('dhan', { tokenId: 'tok-1' })).toMatchObject({
+      ok: true,
+    });
   });
 
   it('refuses when the app secrets vanished between start and redirect', async () => {
     await startLogin();
     h.secrets.docs.delete('dhan-client-id');
-    expect(await h.service.completeDhanRedirect('tok-1')).toMatchObject({
+    expect(await h.service.completeRedirect('dhan', { tokenId: 'tok-1' })).toMatchObject({
       ok: false,
       reason: 'SECRET_MISSING',
     });
@@ -378,9 +383,9 @@ describe('completeDhanRedirect', () => {
 
   it('refuses a pending login older than the TTL — nothing is sent to Dhan', async () => {
     await startLogin();
-    h.clock.advance(DHAN_CONSENT_TTL_MS + 1_000);
+    h.clock.advance(LOGIN_TTL_MS + 1_000);
 
-    expect(await h.service.completeDhanRedirect('tok-1')).toMatchObject({
+    expect(await h.service.completeRedirect('dhan', { tokenId: 'tok-1' })).toMatchObject({
       ok: false,
       reason: 'NO_PENDING_LOGIN',
       detail: expect.stringContaining('too long') as string,
@@ -390,19 +395,173 @@ describe('completeDhanRedirect', () => {
 
   it('a fresh login replaces a stale pending one', async () => {
     await startLogin();
-    h.clock.advance(DHAN_CONSENT_TTL_MS + 1_000);
+    h.clock.advance(LOGIN_TTL_MS + 1_000);
     await startLogin();
     h.http.responses.push(CONSENT_CONSUMED);
-    expect(await h.service.completeDhanRedirect('tok-1')).toMatchObject({ ok: true });
+    expect(await h.service.completeRedirect('dhan', { tokenId: 'tok-1' })).toMatchObject({
+      ok: true,
+    });
   });
 
   it('never puts the token in the result or the audit trail', async () => {
     await startLogin();
     h.http.responses.push(CONSENT_CONSUMED);
-    const result = await h.service.completeDhanRedirect('tok-1');
+    const result = await h.service.completeRedirect('dhan', { tokenId: 'tok-1' });
     expect(JSON.stringify(result)).not.toContain('dhan-daily-token');
     expect(JSON.stringify(h.auditLog.byType('session.connected'))).not.toContain(
       'dhan-daily-token',
     );
+  });
+});
+
+describe('completeRedirect — dhan (request shape)', () => {
+  it('refuses a redirect without a tokenId, without spending the pending login', async () => {
+    h.http.responses.push(CONSENT_STARTED);
+    await h.service.loginUrl('u1', 'dhan');
+    expect(await h.service.completeRedirect('dhan', {})).toMatchObject({
+      ok: false,
+      reason: 'INVALID_REQUEST',
+    });
+    h.http.responses.push(CONSENT_CONSUMED);
+    expect(await h.service.completeRedirect('dhan', { tokenId: 'tok-1' })).toMatchObject({
+      ok: true,
+    });
+  });
+});
+
+describe('completeRedirect — kite', () => {
+  const KITE_REDIRECT = {
+    request_token: 'rt-1',
+    action: 'login',
+    status: 'success',
+    state: 'nonce-1',
+  };
+
+  async function startLogin(): Promise<void> {
+    expect(await h.service.loginUrl('u1', 'kite')).toMatchObject({ ok: true });
+  }
+
+  it('refuses a redirect when no Kite login is pending — even if a Dhan one is', async () => {
+    h.http.responses.push(CONSENT_STARTED);
+    await h.service.loginUrl('u1', 'dhan');
+    expect(await h.service.completeRedirect('kite', KITE_REDIRECT)).toMatchObject({
+      ok: false,
+      reason: 'NO_PENDING_LOGIN',
+    });
+    expect(h.http.requests).toHaveLength(1); // only the Dhan consent generation
+  });
+
+  it('exchanges the request token, stores it, records the expiry and syncs the engine creds', async () => {
+    await startLogin();
+    h.http.responses.push(OK_SESSION);
+
+    const result = await h.service.completeRedirect('kite', KITE_REDIRECT);
+
+    expect(result).toEqual({
+      ok: true,
+      broker: 'kite',
+      uid: 'u1',
+      connected: true,
+      expiresAt: '2026-01-14T00:30:00.000Z',
+    });
+    expect(h.http.requests[0]).toMatchObject({
+      method: 'POST',
+      url: 'https://kite.test/v3/session/token',
+    });
+    expect(h.http.requests[0]?.body).toContain('request_token=rt-1');
+    expect(await h.secrets.get('kite-access-token')).toEqual({
+      value: 'kite-daily-token',
+      expiresAt: '2026-01-14T00:30:00.000Z',
+    });
+    expect(await h.sessions.get('u1', 'kite')).toMatchObject({
+      broker: 'kite',
+      connected: true,
+      expiresAt: '2026-01-14T00:30:00.000Z',
+    });
+    expect(h.auditLog.byType('session.connected')[0]?.detail['broker']).toBe('kite');
+    expect(JSON.parse(h.secrets.docs.get(STRATEGY_SECRET)?.value ?? 'null')).toEqual({
+      broker: 'dhan', // the active broker stays in charge; kite creds ride alongside
+      kite: {
+        apiKey: 'kite-key',
+        accessToken: 'kite-daily-token',
+        expiresAt: '2026-01-14T00:30:00.000Z',
+      },
+    });
+  });
+
+  it('refuses a redirect whose state nonce is not the one it issued, keeping the login pending', async () => {
+    await startLogin();
+    expect(
+      await h.service.completeRedirect('kite', { ...KITE_REDIRECT, state: 'forged' }),
+    ).toMatchObject({ ok: false, reason: 'STATE_MISMATCH' });
+    expect(
+      await h.service.completeRedirect('kite', { ...KITE_REDIRECT, state: undefined }),
+    ).toMatchObject({
+      ok: false,
+      reason: 'STATE_MISMATCH',
+    });
+    expect(h.http.requests).toHaveLength(0);
+
+    h.http.responses.push(OK_SESSION);
+    expect(await h.service.completeRedirect('kite', KITE_REDIRECT)).toMatchObject({ ok: true });
+  });
+
+  it('refuses a redirect without a request_token', async () => {
+    await startLogin();
+    expect(
+      await h.service.completeRedirect('kite', {
+        action: 'login',
+        status: 'error',
+        state: 'nonce-1',
+      }),
+    ).toMatchObject({ ok: false, reason: 'INVALID_REQUEST' });
+    expect(h.http.requests).toHaveLength(0);
+  });
+
+  it('refuses a login by a different Zerodha account and stores nothing', async () => {
+    await startLogin();
+    h.http.responses.push({
+      ...OK_SESSION,
+      bodyText: JSON.stringify({
+        status: 'success',
+        data: { access_token: 'someone-elses-token', user_id: 'ZZ9999' },
+      }),
+    });
+
+    expect(await h.service.completeRedirect('kite', KITE_REDIRECT)).toMatchObject({
+      ok: false,
+      reason: 'CLIENT_MISMATCH',
+    });
+    expect(await h.secrets.get('kite-access-token')).toBeUndefined();
+    expect(await h.sessions.get('u1', 'kite')).toBeUndefined();
+    expect(await h.service.completeRedirect('kite', KITE_REDIRECT)).toMatchObject({
+      reason: 'NO_PENDING_LOGIN',
+    });
+  });
+
+  it('surfaces a failed exchange', async () => {
+    await startLogin();
+    h.http.responses.push({
+      status: 403,
+      headers: {},
+      bodyText: JSON.stringify({ status: 'error', message: 'Token is invalid or has expired.' }),
+    });
+    expect(await h.service.completeRedirect('kite', KITE_REDIRECT)).toMatchObject({
+      ok: false,
+      reason: 'EXCHANGE_FAILED',
+    });
+  });
+
+  it('is single-use and never puts the token in the result or the audit trail', async () => {
+    await startLogin();
+    h.http.responses.push(OK_SESSION);
+    const result = await h.service.completeRedirect('kite', KITE_REDIRECT);
+    expect(JSON.stringify(result)).not.toContain('kite-daily-token');
+    expect(JSON.stringify(h.auditLog.byType('session.connected'))).not.toContain(
+      'kite-daily-token',
+    );
+    expect(await h.service.completeRedirect('kite', KITE_REDIRECT)).toMatchObject({
+      reason: 'NO_PENDING_LOGIN',
+    });
   });
 });

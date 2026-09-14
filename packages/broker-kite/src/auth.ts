@@ -22,9 +22,21 @@ export function computeChecksum(apiKey: string, requestToken: string, apiSecret:
     .digest('hex');
 }
 
-/** The Kite Connect web login URL the app opens (WebView/redirect) for the user. */
-export function loginUrl(apiKey: string): string {
-  return `https://kite.zerodha.com/connect/login?v=3&api_key=${encodeURIComponent(apiKey)}`;
+export interface LoginUrlOptions {
+  /**
+   * Echoed back verbatim on the redirect URL by Kite (`redirect_params`, a
+   * URL-encoded `a=b&c=d` string) — the only way to carry a state nonce
+   * through the login and tie the redirect to the login that started it.
+   */
+  redirectParams?: Readonly<Record<string, string>> | undefined;
+}
+
+/** The Kite Connect web login URL the app opens (system browser) for the user. */
+export function loginUrl(apiKey: string, opts: LoginUrlOptions = {}): string {
+  const base = `https://kite.zerodha.com/connect/login?v=3&api_key=${encodeURIComponent(apiKey)}`;
+  const extra =
+    opts.redirectParams === undefined ? '' : new URLSearchParams(opts.redirectParams).toString();
+  return extra === '' ? base : `${base}&redirect_params=${encodeURIComponent(extra)}`;
 }
 
 export interface ExchangeRequestTokenParams {

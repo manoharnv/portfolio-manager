@@ -34,7 +34,9 @@ describe('extractServerCompletion', () => {
 
   it('reads an error verdict and its reason', () => {
     expect(
-      extractServerCompletion('pm://broker-callback?broker=dhan&status=error&reason=CLIENT_MISMATCH'),
+      extractServerCompletion(
+        'pm://broker-callback?broker=dhan&status=error&reason=CLIENT_MISMATCH',
+      ),
     ).toEqual({ status: 'error', reason: 'CLIENT_MISMATCH' });
     expect(extractServerCompletion('pm://broker-callback?status=error')).toEqual({
       status: 'error',
@@ -200,6 +202,7 @@ describe('runBrokerLogin', () => {
 
     expect(result).toMatchObject({ ok: false, reason: 'LOGIN_FAILED' });
     expect((result as { detail: string }).detail).toContain('not the one configured');
+    expect((result as { detail: string }).detail).not.toMatch(/dhan/i);
   });
 
   it('surfaces the backend failure when no login URL can be obtained', async () => {

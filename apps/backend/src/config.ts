@@ -95,6 +95,13 @@ const RawConfigSchema = z.object({
   KITE_API_KEY_SECRET: stringEnv('kite-api-key'),
   KITE_API_SECRET_SECRET: stringEnv('kite-api-secret'),
   KITE_ACCESS_TOKEN_SECRET: stringEnv('kite-access-token'),
+  /**
+   * The Zerodha client id (e.g. `AB1234`) a Kite login must belong to — the
+   * redirect refuses any other account (services/session.ts). Blank ⇒ any
+   * account that completes the login is accepted, with a warning. Set it
+   * before go-live.
+   */
+  KITE_USER_ID: stringEnv(''),
 
   /** Empty ⇒ deny every uid. Never defaulted to a wildcard. */
   ALLOWED_UIDS: csvList,
@@ -148,6 +155,8 @@ export interface BackendConfig {
   gcpProject: string;
   firebaseProjectId: string;
   secrets: { dhan: BrokerSecretNames; kite: BrokerSecretNames };
+  /** '' ⇒ Kite logins are not checked against a client id. */
+  kiteUserId: string;
   /** Empty ⇒ deny all (fail closed). */
   allowedUids: readonly string[];
   staticIp: string;
@@ -221,6 +230,7 @@ export function parseConfig(env: Env): BackendConfig {
         clientId: '',
       },
     },
+    kiteUserId: raw.KITE_USER_ID,
     allowedUids: raw.ALLOWED_UIDS,
     staticIp: raw.STATIC_IP,
     instrumentsCacheDir: raw.INSTRUMENTS_CACHE_DIR,
