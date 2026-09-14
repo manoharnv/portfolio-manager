@@ -44,11 +44,14 @@ git checkout "${REF}"
 # locally on a re-run.
 git merge --ff-only "origin/${REF}" 2>/dev/null || true
 
-log "pnpm install --frozen-lockfile"
-pnpm install --frozen-lockfile
+# Server apps + their workspace deps only (same rule as infra/vm/bootstrap.sh):
+# a bare `pnpm install && pnpm build` would pull the mobile app's Expo/RN tree
+# and run `expo export` on a 1 GB e2-micro for artifacts the VM never uses.
+log "pnpm install --frozen-lockfile (backend, strategy and their deps only)"
+pnpm install --frozen-lockfile --filter '@pm/backend...' --filter '@pm/strategy...'
 
-log "pnpm build"
-pnpm build
+log "pnpm build (backend, strategy and their deps only)"
+pnpm --filter '@pm/backend...' --filter '@pm/strategy...' build
 
 log "restarting pm-backend, pm-strategy"
 systemctl restart pm-backend.service pm-strategy.service

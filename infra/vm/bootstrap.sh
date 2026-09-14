@@ -73,6 +73,24 @@ corepack prepare pnpm@11.1.1 --activate
 log "pnpm $(pnpm --version 2>/dev/null || echo '?') ready"
 
 # ---------------------------------------------------------------------------
+# 1b. Swap — the e2-micro has 1 GB of RAM shared by two Node processes, Caddy
+#     and the Ops Agent, and the first-boot `pnpm install`/`tsc` peaks well
+#     above that. A 2 GB swapfile turns a would-be OOM kill of pm-backend into
+#     a slow moment. Idempotent: skipped when /swapfile already exists.
+# ---------------------------------------------------------------------------
+if [[ ! -f /swapfile ]]; then
+	log "creating 2 GB swapfile"
+	fallocate -l 2G /swapfile
+	chmod 0600 /swapfile
+	mkswap /swapfile >/dev/null
+	swapon /swapfile
+	grep -qxF '/swapfile none swap sw 0 0' /etc/fstab || printf '/swapfile none swap sw 0 0\n' >>/etc/fstab
+else
+	swapon /swapfile 2>/dev/null || true
+	log "swapfile already present"
+fi
+
+# ---------------------------------------------------------------------------
 # 2. Caddy (official apt repo) — docs/08 §8.2.
 # ---------------------------------------------------------------------------
 if ! command -v caddy >/dev/null 2>&1; then
@@ -128,11 +146,19 @@ id -u pm-strategy >/dev/null 2>&1 || useradd --system --no-create-home --shell /
 #    dirty tree). Steps 6–10 below still re-run every boot so unit/config
 #    edits shipped by deploy.sh are picked up on the next start.
 # ---------------------------------------------------------------------------
+#    Only the two server apps and their workspace dependencies are installed
+#    and built. A bare `pnpm install && pnpm build` would also pull the mobile
+#    app's Expo/React Native tree and run `expo export` (Metro bundling) — on a
+#    1 GB e2-micro that is minutes of swap or an OOM kill, for artifacts the VM
+#    never uses. `...` in the filter = "this package and everything it depends
+#    on" (@pm/core, @pm/broker-dhan, @pm/broker-kite).
 if [[ ! -d "${REPO_DIR}/.git" ]]; then
 	log "first boot: cloning ${REPO_URL}#${REPO_REF} into ${REPO_DIR}"
 	git clone --branch "${REPO_REF}" "${REPO_URL}" "${REPO_DIR}"
-	log "pnpm install (frozen lockfile) + build"
-	(cd "${REPO_DIR}" && pnpm install --frozen-lockfile && pnpm build)
+	log "pnpm install + build (backend, strategy and their deps only)"
+	(cd "${REPO_DIR}" \
+		&& pnpm install --frozen-lockfile --filter '@pm/backend...' --filter '@pm/strategy...' \
+		&& pnpm --filter '@pm/backend...' --filter '@pm/strategy...' build)
 else
 	log "existing checkout at ${REPO_DIR} ($(git -C "${REPO_DIR}" rev-parse --short HEAD)) — not touching it; deploys go through infra/scripts/deploy.sh"
 fi
