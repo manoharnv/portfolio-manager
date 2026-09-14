@@ -330,6 +330,7 @@ export function makeBackendConfig(patch?: Deep<BackendConfig>): BackendConfig {
       simulatorFillAfterMs: 2_000,
       stuckProposalAfterMs: 300_000,
       marketHolidays: [],
+      instrumentSegments: ['EQ'],
     },
     patch,
   );

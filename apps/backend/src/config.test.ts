@@ -68,6 +68,15 @@ describe('parseConfig', () => {
     ).toMatchObject({ strategyReadCredsSecret: 'other', appCallbackUrl: 'pmdev://cb' });
   });
 
+  it('indexes only equities by default and validates INSTRUMENT_SEGMENTS', () => {
+    expect(parseConfig({}).instrumentSegments).toEqual(['EQ']);
+    expect(parseConfig({ INSTRUMENT_SEGMENTS: ' EQ, FNO ' }).instrumentSegments).toEqual([
+      'EQ',
+      'FNO',
+    ]);
+    expect(() => parseConfig({ INSTRUMENT_SEGMENTS: 'EQ,BONDS' })).toThrow(/INSTRUMENT_SEGMENTS/);
+  });
+
   it('allows a blank STATIC_IP outside prod', () => {
     expect(parseConfig({ ENVIRONMENT: 'dry-run' }).staticIp).toBe('');
   });

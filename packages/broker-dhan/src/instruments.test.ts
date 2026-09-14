@@ -90,6 +90,15 @@ describe('DhanInstrumentMaster.loadFromCsv', () => {
     expect(master.loadedAt).toEqual(MASTER_LOADED_AT);
   });
 
+  it('indexes only the requested segments — F&O and currency rows are never materialised', () => {
+    const master = new DhanInstrumentMaster();
+    const stats = master.loadFromCsv(SCRIP_MASTER_CSV, MASTER_LOADED_AT, { segments: ['EQ'] });
+    expect(stats).toEqual({ rows: 5, indexed: 2, skipped: 3, duplicates: 0 });
+    expect(master.size).toBe(2);
+    expect(master.resolve(RELIANCE)).toMatchObject({ brokerInstrumentId: '11536' });
+    expect(() => master.resolve(NIFTY_CE)).toThrow();
+  });
+
   it('resolves the same trading symbol differently per exchange segment', () => {
     const master = makeMaster();
     expect(master.resolve(RELIANCE)).toEqual({

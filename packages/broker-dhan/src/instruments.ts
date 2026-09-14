@@ -22,6 +22,8 @@ import {
   toDhanExchangeSegment,
   type CanonicalSymbol,
   type InstrumentRef,
+  parseCsvRows,
+  type Segment,
 } from '@pm/core';
 import { dhanHttpError, dhanParseError } from './errors.js';
 import type { HttpClient } from './http.js';
@@ -74,67 +76,22 @@ export interface LoadCsvOptions {
    * equity row against a known tick before trusting the default of 1.
    */
   tickSizeDivisor?: number | undefined;
+  /**
+   * Neutral segments to index; rows on any other segment are skipped without
+   * being materialised. The full file is ~200k rows, all but a few thousand
+   * of them F&O contracts — indexing everything costs ~350 MB per process,
+   * which the 1 GB VM cannot afford twice (docs/11 §11.6). `undefined` ⇒ all
+   * supported segments.
+   */
+  segments?: readonly Segment[] | undefined;
 }
 
 // ---------------------------------------------------------------------------
-// CSV — a minimal RFC-4180 reader (quoted fields, embedded commas/newlines,
-// doubled quotes). No dependency: the file is the only CSV this repo parses.
+// CSV — `@pm/core`'s streaming RFC-4180 reader; `parseCsv` is kept for
+// callers and tests that want the whole (small) file at once.
 // ---------------------------------------------------------------------------
 
-export function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let quoted = false;
-  let sawField = false;
-
-  // Strip a UTF-8 BOM; Dhan's file has shipped with one.
-  const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-
-  const endField = (): void => {
-    row.push(field);
-    field = '';
-    sawField = false;
-  };
-  const endRow = (): void => {
-    endField();
-    // A trailing newline must not produce a phantom [''] row.
-    if (row.length > 1 || row[0] !== '') rows.push(row);
-    row = [];
-  };
-
-  for (let i = 0; i < src.length; i += 1) {
-    const ch = src[i] as string;
-    if (quoted) {
-      if (ch === '"') {
-        if (src[i + 1] === '"') {
-          field += '"';
-          i += 1;
-        } else {
-          quoted = false;
-        }
-      } else {
-        field += ch;
-      }
-      continue;
-    }
-    if (ch === '"' && !sawField) {
-      quoted = true;
-      sawField = true;
-    } else if (ch === ',') {
-      endField();
-    } else if (ch === '\n') {
-      endRow();
-    } else if (ch === '\r') {
-      // swallow; the \n that follows ends the row
-    } else {
-      field += ch;
-      sawField = true;
-    }
-  }
-  if (field !== '' || row.length > 0) endRow();
-  return rows;
-}
+export { parseCsv } from '@pm/core';
 
 // ---------------------------------------------------------------------------
 // Column resolution. Dhan has shipped two header families; both are accepted so
@@ -251,11 +208,14 @@ export class DhanInstrumentMaster {
       throw new BrokerError('UNKNOWN', `Invalid tickSizeDivisor: ${String(opts.tickSizeDivisor)}`);
     }
 
-    const rows = parseCsv(text);
-    const header = rows[0];
-    if (header === undefined) {
+    const segments = opts.segments === undefined ? undefined : new Set<Segment>(opts.segments);
+
+    const rows = parseCsvRows(text);
+    const first = rows.next();
+    if (first.done === true) {
       throw dhanParseError('scrip master', 'the CSV is empty', text.slice(0, 200));
     }
+    const header = first.value;
     const cols = resolveColumns(header);
     const required: ColumnName[] = ['exchange', 'segment', 'securityId', 'tradingSymbol'];
     const missing = required.filter((c) => cols[c] === undefined);
@@ -270,8 +230,7 @@ export class DhanInstrumentMaster {
     const next = new Map<string, DhanInstrument>();
     const stats: MasterStats = { rows: 0, indexed: 0, skipped: 0, duplicates: 0 };
 
-    for (let r = 1; r < rows.length; r += 1) {
-      const row = rows[r] as string[];
+    for (const row of rows) {
       if (row.length === 1 && (row[0] ?? '').trim() === '') continue;
       stats.rows += 1;
 
@@ -280,7 +239,24 @@ export class DhanInstrumentMaster {
         return i === undefined ? undefined : row[i];
       };
 
+      // Segment first: for the bulk of the file (F&O) nothing else is looked at.
       const exchangeSegment = toExchangeSegmentCode(at('exchange') ?? '', at('segment') ?? '');
+      if (exchangeSegment === undefined) {
+        stats.skipped += 1;
+        continue;
+      }
+      let neutral: ReturnType<typeof fromDhanExchangeSegment>;
+      try {
+        neutral = fromDhanExchangeSegment(exchangeSegment);
+      } catch {
+        stats.skipped += 1;
+        continue;
+      }
+      if (segments !== undefined && !segments.has(neutral.segment)) {
+        stats.skipped += 1;
+        continue;
+      }
+
       const tradingSymbol = (at('tradingSymbol') ?? '').trim();
       const securityId = (at('securityId') ?? '').trim();
       const lotSize = num(at('lotSize')) ?? 1;
@@ -288,7 +264,6 @@ export class DhanInstrumentMaster {
       const tickSize = rawTick === undefined ? undefined : rawTick / divisor;
 
       if (
-        exchangeSegment === undefined ||
         tradingSymbol.length === 0 ||
         securityId.length === 0 ||
         !Number.isInteger(lotSize) ||
@@ -300,14 +275,7 @@ export class DhanInstrumentMaster {
         continue;
       }
 
-      let canonical: CanonicalSymbol;
-      try {
-        const neutral = fromDhanExchangeSegment(exchangeSegment);
-        canonical = { ...neutral, tradingSymbol };
-      } catch {
-        stats.skipped += 1;
-        continue;
-      }
+      const canonical: CanonicalSymbol = { ...neutral, tradingSymbol };
 
       const key = indexKey(exchangeSegment, tradingSymbol);
       if (next.has(key)) {

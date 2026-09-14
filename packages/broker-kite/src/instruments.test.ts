@@ -102,6 +102,18 @@ describe('KiteInstrumentMaster', () => {
     expect((caught as BrokerError).kind).toBe('INSTRUMENT_UNKNOWN');
   });
 
+  it('indexes only the requested segments — derivatives are never materialised', () => {
+    const master = new KiteInstrumentMaster();
+    master.loadFromCsv(KITE_INSTRUMENTS_CSV, new Date('2026-01-13T04:30:00.000Z'), {
+      segments: ['EQ'],
+    });
+    expect(master.size).toBe(2);
+    expect(master.has(NSE_RELIANCE)).toBe(true);
+    expect(master.has(BSE_TATASTEEL)).toBe(true);
+    expect(master.has(NFO_NIFTY_CE)).toBe(false);
+    expect(master.has(MCX_GOLDPETAL)).toBe(false);
+  });
+
   it('skips rows on a segment @pm/core has no mapping for, without throwing', () => {
     const master = makeLoadedInstrumentMaster();
     // 5 data rows in the fixture, one of them (CDS) is unmappable.

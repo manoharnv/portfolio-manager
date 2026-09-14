@@ -29,13 +29,17 @@ fi
 # bash reads a script incrementally, and the `git checkout` below rewrites
 # THIS file when the ref changes it — the rest of the run would then execute
 # whatever bytes the new version has at the old offsets. So never run from
-# the checkout: copy to a private temp file and re-exec from there.
-if [[ "${PM_DEPLOY_DETACHED:-}" != 1 ]]; then
+# the checkout: copy to a private temp file and re-exec from there. (A script
+# piped over ssh — `sudo bash -s <ref> < deploy.sh` — has no file to rewrite
+# and runs as is.)
+if [[ "${PM_DEPLOY_DETACHED:-}" != 1 && -f "${BASH_SOURCE[0]:-}" ]]; then
 	tmp_script="$(mktemp /tmp/pm-deploy.XXXXXX.sh)"
 	cp -- "${BASH_SOURCE[0]}" "${tmp_script}"
 	PM_DEPLOY_DETACHED=1 exec bash "${tmp_script}" "$@"
 fi
-trap 'rm -f -- "${BASH_SOURCE[0]}"' EXIT
+if [[ "${PM_DEPLOY_DETACHED:-}" == 1 ]]; then
+	trap 'rm -f -- "${BASH_SOURCE[0]}"' EXIT
+fi
 
 cd "${REPO_DIR}"
 

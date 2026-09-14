@@ -124,7 +124,10 @@ async function main(): Promise<void> {
   // strategy engine to read via file:// — see instruments-cache.ts.
   try {
     const csv = await fetchDhanCsv(dhanCsvHttp);
-    dhanInstruments.loadFromCsv(csv, clock.now());
+    const stats = dhanInstruments.loadFromCsv(csv, clock.now(), {
+      segments: config.instrumentSegments,
+    });
+    logger.info({ ...stats, segments: config.instrumentSegments }, 'Dhan scrip master indexed');
     const cached = await writeInstrumentCache(config.instrumentsCacheDir, DHAN_CACHE_FILE, csv);
     if (cached !== undefined) logger.info(cached, 'cached the Dhan scrip master');
   } catch (err) {
@@ -132,7 +135,11 @@ async function main(): Promise<void> {
   }
   try {
     const csv = await fetchKiteCsv(kiteCsvHttp, KITE_INSTRUMENTS_URL);
-    kiteInstruments.loadFromCsv(csv, clock.now());
+    kiteInstruments.loadFromCsv(csv, clock.now(), { segments: config.instrumentSegments });
+    logger.info(
+      { size: kiteInstruments.size, segments: config.instrumentSegments },
+      'Kite instrument master indexed',
+    );
     const cached = await writeInstrumentCache(config.instrumentsCacheDir, KITE_CACHE_FILE, csv);
     if (cached !== undefined) logger.info(cached, 'cached the Kite instrument master');
   } catch (err) {

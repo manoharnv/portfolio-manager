@@ -18,8 +18,9 @@ import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { DhanInstrumentMaster, createDhanReadAdapter } from '@pm/broker-dhan';
 import { KiteInstrumentMaster, createKiteReadAdapter } from '@pm/broker-kite';
-import type { Broker, BrokerCreds, BrokerReadAdapter } from '@pm/core';
+import type { Broker, BrokerCreds, BrokerReadAdapter, Segment } from '@pm/core';
 import { createLogger } from './logger.js';
+import { readEnv } from './env.js';
 import { readInstrumentsSource } from './instruments-source.js';
 import { runTick, type HarnessDeps } from './harness.js';
 import { TICKS, type Tick } from './types.js';
@@ -41,40 +42,6 @@ import {
 } from './adapters/firestore/index.js';
 
 const IST = 'Asia/Kolkata';
-
-export interface EngineEnv {
-  uid: string;
-  /** Secret Manager resource name holding the broker's READ credentials. */
-  brokerSecret: string;
-  /** Instrument-master CSV URL for the active broker. */
-  instrumentsUrl: string;
-  holidays: string[];
-  prettyLogs: boolean;
-  intradayIntervalMinutes: number;
-}
-
-function required(env: NodeJS.ProcessEnv, key: string): string {
-  const value = env[key];
-  if (value === undefined || value.trim() === '') {
-    throw new Error(`Missing required environment variable ${key}`);
-  }
-  return value;
-}
-
-export function readEnv(env: NodeJS.ProcessEnv = process.env): EngineEnv {
-  const interval = Number(env['PM_INTRADAY_INTERVAL_MINUTES'] ?? '5');
-  return {
-    uid: required(env, 'PM_UID'),
-    brokerSecret: required(env, 'PM_BROKER_SECRET'),
-    instrumentsUrl: required(env, 'PM_INSTRUMENTS_URL'),
-    holidays: (env['PM_HOLIDAYS'] ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0),
-    prettyLogs: env['PM_PRETTY_LOGS'] === 'true',
-    intradayIntervalMinutes: Number.isFinite(interval) && interval > 0 ? interval : 5,
-  };
-}
 
 async function loadSecret(name: string): Promise<string> {
   const client = new SecretManagerServiceClient();
@@ -99,16 +66,21 @@ type LoadedMaster =
   | { broker: 'dhan'; instruments: DhanInstrumentMaster }
   | { broker: 'kite'; instruments: KiteInstrumentMaster };
 
-async function loadMaster(broker: Broker, instrumentsUrl: string, now: Date): Promise<LoadedMaster> {
+async function loadMaster(
+  broker: Broker,
+  instrumentsUrl: string,
+  segments: readonly Segment[],
+  now: Date,
+): Promise<LoadedMaster> {
   // file:// on the VM (the backend's local cache), http(s):// for local runs.
   const csv = await readInstrumentsSource(instrumentsUrl);
   if (broker === 'dhan') {
     const instruments = new DhanInstrumentMaster();
-    instruments.loadFromCsv(csv, now);
+    instruments.loadFromCsv(csv, now, { segments });
     return { broker, instruments };
   }
   const instruments = new KiteInstrumentMaster();
-  instruments.loadFromCsv(csv, now);
+  instruments.loadFromCsv(csv, now, { segments });
   return { broker, instruments };
 }
 
@@ -169,7 +141,7 @@ async function refreshBroker(
   if (creds.broker !== master.broker) {
     logger.error(
       { loaded: master.broker, wanted: creds.broker },
-      'active broker changed but this process loaded the other broker\'s instrument master — restart pm-strategy with the matching PM_INSTRUMENTS_URL; keeping the previous credentials',
+      "active broker changed but this process loaded the other broker's instrument master — restart pm-strategy with the matching PM_INSTRUMENTS_URL; keeping the previous credentials",
     );
     return previous;
   }
@@ -213,7 +185,11 @@ export async function main(): Promise<void> {
   const startedAt = new Date();
   const initialRaw = await loadSecret(env.brokerSecret);
   const initialCreds = parseCreds(initialRaw);
-  const master = await loadMaster(initialCreds.broker, env.instrumentsUrl, startedAt);
+  const master = await loadMaster(initialCreds.broker, env.instrumentsUrl, env.segments, startedAt);
+  logger.info(
+    { broker: initialCreds.broker, segments: env.segments, size: master.instruments.size },
+    'instrument master indexed',
+  );
   let broker: BrokerHandle = {
     raw: initialRaw,
     creds: initialCreds,
@@ -263,7 +239,10 @@ export async function main(): Promise<void> {
     logger.info({ tick, pattern }, 'tick scheduled');
   }
 
-  logger.info({ uid: env.uid, broker: broker.read.broker }, 'strategy engine started (proposals only)');
+  logger.info(
+    { uid: env.uid, broker: broker.read.broker },
+    'strategy engine started (proposals only)',
+  );
 }
 
 async function runOne(

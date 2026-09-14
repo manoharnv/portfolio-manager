@@ -13,6 +13,7 @@
  */
 
 import { z } from 'zod';
+import { SegmentSchema, type Segment } from '@pm/core';
 
 export type Env = Record<string, string | undefined>;
 
@@ -128,6 +129,15 @@ const RawConfigSchema = z.object({
 
   /** IST `YYYY-MM-DD` exchange holidays; merged into core's market-hours check. */
   MARKET_HOLIDAYS: csvList.pipe(z.array(IsoDateSchema)),
+  /**
+   * Neutral segments the instrument masters keep in memory (`EQ`, `FNO`,
+   * `CURRENCY`, `COMMODITY`). The Dhan master alone is ~200k rows, all but a
+   * few thousand of them F&O contracts; indexing everything costs ~350 MB per
+   * process, which the 1 GB VM cannot afford twice. Blank ⇒ `EQ`.
+   */
+  INSTRUMENT_SEGMENTS: csvList
+    .pipe(z.array(SegmentSchema))
+    .transform((list): Segment[] => (list.length === 0 ? ['EQ'] : list)),
 });
 
 export interface BackendConfig {
@@ -152,6 +162,8 @@ export interface BackendConfig {
   simulatorFillAfterMs: number;
   stuckProposalAfterMs: number;
   marketHolidays: readonly string[];
+  /** Which neutral segments the instrument masters index; never empty. */
+  instrumentSegments: readonly Segment[];
 }
 
 export class ConfigError extends Error {
@@ -220,6 +232,7 @@ export function parseConfig(env: Env): BackendConfig {
     simulatorFillAfterMs: raw.SIMULATOR_FILL_AFTER_MS,
     stuckProposalAfterMs: raw.STUCK_PROPOSAL_AFTER_MS,
     marketHolidays: raw.MARKET_HOLIDAYS,
+    instrumentSegments: raw.INSTRUMENT_SEGMENTS,
   };
 }
 

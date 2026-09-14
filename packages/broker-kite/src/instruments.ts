@@ -18,11 +18,13 @@
 
 import {
   fromKiteExchangeSegment,
+  parseCsvRows,
   symbolKey,
   BrokerError,
   UnsupportedMappingError,
   type CanonicalSymbol,
   type InstrumentRef,
+  type Segment,
 } from '@pm/core';
 import type { HttpClient } from './http.js';
 import { mapTransportError } from './errors.js';
@@ -36,66 +38,20 @@ const REQUIRED_COLUMNS = [
 ] as const;
 
 /**
- * Minimal hand-rolled CSV parser — no dependency. Handles quoted fields
- * (including embedded commas and escaped `""` quotes) and both LF and CRLF
- * line endings.
+ * CSV parsing is `@pm/core`'s streaming RFC-4180 reader (quoted fields,
+ * embedded commas, escaped `""`, LF/CRLF); `parseCsv` is kept for callers and
+ * tests that want the whole (small) file at once.
  */
-export function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let inQuotes = false;
-  let i = 0;
-  const n = text.length;
+export { parseCsv } from '@pm/core';
 
-  while (i < n) {
-    const ch = text.charAt(i);
-    if (inQuotes) {
-      if (ch === '"') {
-        if (text.charAt(i + 1) === '"') {
-          field += '"';
-          i += 2;
-          continue;
-        }
-        inQuotes = false;
-        i += 1;
-        continue;
-      }
-      field += ch;
-      i += 1;
-      continue;
-    }
-    if (ch === '"') {
-      inQuotes = true;
-      i += 1;
-      continue;
-    }
-    if (ch === ',') {
-      row.push(field);
-      field = '';
-      i += 1;
-      continue;
-    }
-    if (ch === '\r') {
-      i += 1;
-      continue;
-    }
-    if (ch === '\n') {
-      row.push(field);
-      rows.push(row);
-      row = [];
-      field = '';
-      i += 1;
-      continue;
-    }
-    field += ch;
-    i += 1;
-  }
-  if (field.length > 0 || row.length > 0) {
-    row.push(field);
-    rows.push(row);
-  }
-  return rows;
+export interface LoadCsvOptions {
+  /**
+   * Neutral segments to index; rows on any other segment are skipped without
+   * being materialised. The dump is ~100k rows, mostly F&O — on the 1 GB VM
+   * indexing everything is memory the backend does not have (docs/11 §11.6).
+   * `undefined` ⇒ all supported segments.
+   */
+  segments?: readonly Segment[] | undefined;
 }
 
 function indexColumns(header: readonly string[]): Record<string, number> {
@@ -111,14 +67,16 @@ export class KiteInstrumentMaster {
   private loadedAt: Date | undefined = undefined;
 
   /** Parse a full `/instruments` CSV dump and replace the in-memory index. */
-  loadFromCsv(text: string, loadedAt: Date): void {
-    const rows = parseCsv(text);
-    const header = rows[0];
-    if (header === undefined) {
+  loadFromCsv(text: string, loadedAt: Date, opts: LoadCsvOptions = {}): void {
+    const segments = opts.segments === undefined ? undefined : new Set<Segment>(opts.segments);
+    const rows = parseCsvRows(text);
+    const first = rows.next();
+    if (first.done === true) {
       this.byKey = new Map();
       this.loadedAt = loadedAt;
       return;
     }
+    const header = first.value;
 
     const idx = indexColumns(header);
     const columnIndex = (name: string): number => {
@@ -136,9 +94,7 @@ export class KiteInstrumentMaster {
     const iExchange = columnIndex('exchange');
 
     const newMap = new Map<string, InstrumentRef>();
-    for (let r = 1; r < rows.length; r += 1) {
-      const cols = rows[r];
-      if (cols === undefined) continue;
+    for (const cols of rows) {
       if (cols.length === 1 && cols[0] === '') continue; // trailing blank line
 
       const exchangeCode = cols[iExchange] ?? '';
@@ -152,6 +108,7 @@ export class KiteInstrumentMaster {
         if (err instanceof UnsupportedMappingError) continue; // segment we don't trade — skip
         throw err;
       }
+      if (segments !== undefined && !segments.has(neutral.segment)) continue;
 
       const canonical: CanonicalSymbol = { ...neutral, tradingSymbol };
       const ref: InstrumentRef = {
