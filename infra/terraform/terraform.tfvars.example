@@ -28,12 +28,13 @@ image = "debian-cloud/debian-12"
 
 enable_staging_vm = false
 
-# Operating window (docs/08 §8.2). Default: VM up 07:15–16:15 IST Mon–Fri via a
-# Compute Engine instance schedule — two hours of pre-market before the 09:15
-# open, down after the 15:45 eod tick and reconcile have settled. In this mode
-# the 24/7 uptime check is replaced by a Cloud Scheduler /health ping.
-# Set vm_schedule_enabled = false for an always-on VM with the uptime check.
-vm_schedule_enabled = true
+# Optional operating window (docs/08 §8.2). Default false = always-on VM with a
+# 24/7 uptime check. true = a Compute Engine instance schedule runs the VM
+# 07:15–16:15 IST Mon–Fri (two hours of pre-market before the 09:15 open, down
+# after the 15:45 eod tick settles) and swaps the uptime check for a Cloud
+# Scheduler /health ping. Note the saving is small (~₹230/month): the reserved
+# static IP is billed at the higher *unused* rate while the VM is off.
+vm_schedule_enabled = false
 vm_start_cron       = "15 7 * * 1-5"
 vm_stop_cron        = "15 16 * * 1-5"
 vm_health_ping_cron = "45 7 * * 1-5"

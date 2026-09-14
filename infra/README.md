@@ -541,16 +541,16 @@ exactly (same name, same default). `apps/strategy/src/index.ts`'s
 **No mismatches found** — see the final report for this task for the full
 line-by-line table.
 
-## 5. Operating window — the VM runs on a schedule
+## 5. Optional operating window (off by default — the VM is always on)
 
-The VM is **not** always on. `infra/terraform/vm.tf` attaches a Compute Engine
-instance schedule (`Asia/Kolkata`): **start 07:15 IST, stop 16:15 IST, Mon–Fri**
-(`vm_start_cron` / `vm_stop_cron` in `terraform.tfvars`). Two hours of pre-market
-before the 09:15 open for global-market/news review and the opening gap; a
-45-minute buffer after the 15:30 close for the 15:45 eod tick and the reconcile
-loop.
+By default the VM runs 24/7. Setting `vm_schedule_enabled = true` in
+`terraform.tfvars` attaches a Compute Engine instance schedule (`Asia/Kolkata`):
+**start 07:15 IST, stop 16:15 IST, Mon–Fri** (`vm_start_cron` / `vm_stop_cron`) —
+two hours of pre-market before the 09:15 open and a 45-minute buffer after the
+15:30 close for the 15:45 eod tick and the reconcile loop. It was evaluated for
+this deployment and left off: it saves only ~₹230/month (docs/08 §8.9).
 
-What this means operationally:
+If you do enable it, this is what changes operationally:
 
 - **Deploys are explicit.** `bootstrap.sh` clones and builds on the *first* boot
   only; on every scheduled start it re-installs units/configs and starts the

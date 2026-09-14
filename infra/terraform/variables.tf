@@ -108,14 +108,17 @@ variable "repo_ref" {
 
 variable "vm_schedule_enabled" {
   description = <<-EOT
-    Run the VM only during the trading window via a Compute Engine instance
-    schedule (start/stop crons below, Asia/Kolkata). true = scheduled mode
-    (default): the 24/7 uptime check is replaced by a Cloud Scheduler /health
-    ping at `vm_health_ping_cron`, because a box that is off ~15 h/day would
-    otherwise page every evening. false = always-on with the uptime check.
+    false (default) = always-on VM with a 24/7 uptime check.
+    true = run the VM only during the trading window via a Compute Engine
+    instance schedule (start/stop crons below, Asia/Kolkata); the uptime check
+    is replaced by a Cloud Scheduler /health ping at `vm_health_ping_cron`,
+    because a box that is off ~15 h/day would otherwise page every evening.
+    Evaluated and left off for this deployment: the reserved static IP is
+    billed at the higher unused rate while the VM is stopped, so the net saving
+    is only ~₹230/month (docs/08 §8.9).
   EOT
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "vm_start_cron" {

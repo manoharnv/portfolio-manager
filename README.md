@@ -77,16 +77,17 @@ endpoints, and it sits behind the whitelisted static IP.
 
 ## Running cost (steady state)
 
-The VM runs only during the trading window (07:15–16:15 IST, Mon–Fri) via a Compute
-Engine instance schedule — see [docs/08 §8.2](docs/08-infrastructure.md).
+Always-on VM (a trading-window schedule exists as an opt-in but saves only ~₹230/month
+because the reserved static IP costs more while unattached — see
+[docs/08 §8.9](docs/08-infrastructure.md)).
 
 | Item | Cost |
 |---|---|
-| e2-micro VM (asia-south1), in-window only | ~$1.9/month |
+| e2-micro VM (asia-south1), 24/7 | ~$7.3/month |
 | 30 GB boot disk | ~$1.4/month |
-| Reserved static IP (billed at the higher *unused* rate while the VM is off) | ~$6.4/month |
+| Reserved static IP, in use | ~$3.7/month |
 | Snapshots, Secret Manager, Functions, Firestore/Auth/FCM/Monitoring | ~$0.7/month (mostly free tiers) |
-| **GCP total** | **≈ $10.5 ≈ ₹900/month (≈ ₹1,050 incl. GST)**; always-on would be ≈ ₹1,300 |
+| **GCP total** | **≈ $13 ≈ ₹1,100/month (≈ ₹1,300 incl. GST)** |
 | Dhan order API | free |
 | Dhan market-data API | free if 25+ trades/30d, else ₹499/month |
 | Domain for the backend hostname | ~₹100/month amortised |
