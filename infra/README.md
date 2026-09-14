@@ -219,6 +219,34 @@ then applies the two TTL field policies from `functions/README.md` that
 `firebase deploy` never touches (`proposals.ttlExpiresAt`,
 `idempotency.createdAt`).
 
+> **Spark vs Blaze:** rules and indexes deploy on the free Spark plan. Cloud
+> Functions and the TTL policies are rejected with "billing disabled" until the
+> project is on Blaze — deploy `firestore:rules,firestore:indexes` alone in the
+> meantime (that is what a Spark project can run).
+
+Then provision the **operator-owned Firestore documents** for your user. The
+rules forbid the app from *creating* `config`, `users`, `books`,
+`strategies/defs` and `brokerSessions` (docs/03 §3.9), so an operator seeds them
+once with the Admin SDK. Sign in to the app first, read your uid from
+Authentication → Users, then:
+
+```bash
+cd apps/strategy
+# inspect first (no writes, no auth needed)
+GOOGLE_CLOUD_QUOTA_PROJECT=<PROJECT_ID> pnpm exec tsx scripts/seed-user.ts \
+  --project <PROJECT_ID> --uid <FIREBASE_UID> --email <YOUR_EMAIL> --dry-run
+# then write (uses Application Default Credentials)
+GOOGLE_CLOUD_QUOTA_PROJECT=<PROJECT_ID> pnpm exec tsx scripts/seed-user.ts \
+  --project <PROJECT_ID> --uid <FIREBASE_UID> --email <YOUR_EMAIL>
+```
+
+The script validates every document against the same zod schemas the app,
+backend and strategy engine read (including each strategy's own params
+schema), and uses `create()` so it refuses to overwrite live documents
+(`--force` reseeds deliberately). The seeded state is inert by design:
+`environment=dry-run`, `tradingEnabled=false`, every strategy disabled,
+₹10k/order cap — you turn things on from the app.
+
 ### 0.11 Smoke test
 
 ```bash

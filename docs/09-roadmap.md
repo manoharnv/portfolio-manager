@@ -19,6 +19,9 @@ proven**. Every phase is independently useful.
 - Backend read endpoints + cached `portfolio/*` read model.
 - **Books + ledger foundations** (read-side): capital sleeves + position attribution
   ([10-multi-strategy.md](10-multi-strategy.md) §10.3–10.4).
+- **Seed the operator-owned documents** (`config`, `users`, `books`, `strategies/defs`,
+  `brokerSessions`) with `apps/strategy/scripts/seed-user.ts` — schema-validated,
+  create-only, inert defaults (dry-run, trading off, strategies off).
 - App: Firebase Auth, Dashboard (holdings, P&L, session status, per-book view), Broker
   Connect.
 - **Exit:** you log in, connect Dhan, see live holdings attributed to books. Zero order
