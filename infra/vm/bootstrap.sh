@@ -253,8 +253,16 @@ systemctl start pm-egress-allowlist.service # populate the sets now, don't wait 
 # certificates are cached under /var/lib/caddy, so this never re-triggers ACME.
 systemctl enable caddy.service
 systemctl restart caddy.service
-systemctl enable --now pm-backend.service
-systemctl enable --now pm-strategy.service
+# deploy.sh re-runs this script after a build and then (re)starts the two
+# units itself, backend first: with PM_BOOTSTRAP_SKIP_START=1 only enable
+# them here, so the engine does not come up alongside the backend's start-up
+# parse (both index the instrument master; see docs/11 §11.6 #14).
+if [[ "${PM_BOOTSTRAP_SKIP_START:-}" == 1 ]]; then
+	systemctl enable pm-backend.service pm-strategy.service
+else
+	systemctl enable --now pm-backend.service
+	systemctl enable --now pm-strategy.service
+fi
 
 log "bootstrap complete. Check: systemctl status pm-backend pm-strategy caddy pm-egress-allowlist.timer"
 log "Remember: /etc/pm/backend.env and /etc/pm/strategy.env still need PM_UID / PM_BROKER_SECRET / broker secret values filled in — see infra/README.md Phase 0."

@@ -79,7 +79,7 @@ pnpm --filter '@pm/backend...' --filter '@pm/strategy...' build
 # bootstrap.sh is the sanctioned way to ship unit/config/firewall/swap changes;
 # it is idempotent, and with the checkout present it never rebuilds.
 log "re-applying infra/vm/bootstrap.sh (units, configs, firewall, swap)"
-bash "${REPO_DIR}/infra/vm/bootstrap.sh"
+PM_BOOTSTRAP_SKIP_START=1 bash "${REPO_DIR}/infra/vm/bootstrap.sh"
 
 # Backend first, engine after it is healthy: both parse the same multi-MB
 # instrument master at start-up, and doing that concurrently on 1 GB pushes
