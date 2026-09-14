@@ -76,7 +76,7 @@ Run `grep -rn "VERIFY-LIVE" packages/` to find the exact lines.
 
 | # | Assumption to verify | Where | Risk if wrong |
 |---|---|---|---|
-| 1 | **Exchange holiday list is empty by default.** `PM_HOLIDAYS` (engine) and the backend's `marketHolidays` must be populated with the NSE calendar, else holidays are treated as trading days (ticks fire; proposals expire unusable). | `index.ts`, `schedule.ts` | 🟠 Noise + wasted proposals on holidays. |
+| 1 | **Exchange holiday list must be populated** — `PM_HOLIDAYS` (engine) and `MARKET_HOLIDAYS` (backend) are empty in the templates; with them empty, holidays are treated as trading days (ticks fire; proposals expire unusable). The 2026 list is checked in at `infra/vm/env/nse-holidays-2026.txt` (16 weekday closures); refresh it every December and on special-closure circulars. | `index.ts`, `schedule.ts` | 🟠 Noise + wasted proposals on holidays. |
 | 2 | Composite indexes for the engine's queries — `auditLog (uid, type, ts)` and `proposals (uid, status)` — are now in `firestore.indexes.json`; confirm they deploy and the queries use them. | `adapters/firestore/repos.ts` | 🟠 Ticks fail on FAILED_PRECONDITION. |
 | 3 | **Service-account scoping is not enforceable by Firestore IAM** (no per-collection conditions). The engine's "proposals + auditLog only" write set is enforced by code, lint and `policy.test.ts`, not by IAM. Infra must still give the engine SA the least role (`roles/datastore.user`) and **no** Secret Manager access to order/token secrets. | infra | 🟡 Defence-in-depth relies on the code layers. |
 | 4 | `FirestoreLike` is a structural slice of `firebase-admin@13`'s `Firestore`; re-verify on SDK upgrades. | `adapters/firestore/types.ts` | 🟡 Compile break on upgrade. |
