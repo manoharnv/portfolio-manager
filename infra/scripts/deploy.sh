@@ -63,20 +63,27 @@ bash "${REPO_DIR}/infra/vm/bootstrap.sh"
 log "restarting pm-backend, pm-strategy"
 systemctl restart pm-backend.service pm-strategy.service
 
-# Give the backend a moment to bind its port before probing it.
-sleep 3
-
 # shellcheck source=/dev/null
 source /etc/pm/backend.env 2>/dev/null || true
 PORT="${PORT:-8080}"
 
-log "health check: http://127.0.0.1:${PORT}/health"
-if curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/health"; then
-	echo
+# The backend downloads both brokers' instrument masters (multi-MB CSVs)
+# before it binds its port — 45–90 s on an e2-micro — so probe with patience
+# instead of failing 3 s after the restart.
+log "health check: http://127.0.0.1:${PORT}/health (waiting up to 180 s for the backend to bind)"
+health_ok=0
+for _ in $(seq 1 36); do
+	if body="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/health" 2>/dev/null)"; then
+		health_ok=1
+		break
+	fi
+	sleep 5
+done
+if [[ "${health_ok}" == 1 ]]; then
+	printf '%s\n' "${body}"
 	log "health check OK"
 else
-	echo
-	log "health check FAILED — see 'systemctl status pm-backend' output below"
+	log "health check FAILED after 180 s — see 'systemctl status pm-backend' / 'journalctl -u pm-backend' output below"
 fi
 
 echo

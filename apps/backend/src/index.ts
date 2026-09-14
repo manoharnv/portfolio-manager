@@ -110,15 +110,21 @@ async function main(): Promise<void> {
   // --- broker adapters (explicit registration = order capability) ---------
   const dhanHttp = createDhanHttp();
   const kiteHttp = createKiteHttp();
+  // The instrument masters are multi-MB CSVs; the API clients' 10 s default
+  // timed out on the e2-micro (VERIFY-LIVE, first boot). Dedicated clients with
+  // a generous budget for those two downloads only.
+  const csvTimeoutMs = 120_000;
+  const dhanCsvHttp = createDhanHttp({ defaultTimeoutMs: csvTimeoutMs });
+  const kiteCsvHttp = createKiteHttp({ defaultTimeoutMs: csvTimeoutMs });
   const dhanInstruments = new DhanInstrumentMaster();
   const kiteInstruments = new KiteInstrumentMaster();
   try {
-    dhanInstruments.loadFromCsv(await fetchDhanCsv(dhanHttp), clock.now());
+    dhanInstruments.loadFromCsv(await fetchDhanCsv(dhanCsvHttp), clock.now());
   } catch (err) {
     logger.error({ err: String(err) }, 'failed to load the Dhan scrip master');
   }
   try {
-    kiteInstruments.loadFromCsv(await fetchKiteCsv(kiteHttp, KITE_INSTRUMENTS_URL), clock.now());
+    kiteInstruments.loadFromCsv(await fetchKiteCsv(kiteCsvHttp, KITE_INSTRUMENTS_URL), clock.now());
   } catch (err) {
     logger.error({ err: String(err) }, 'failed to load the Kite instrument master');
   }

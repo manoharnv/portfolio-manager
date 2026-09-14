@@ -241,7 +241,13 @@ systemctl daemon-reload
 systemctl enable --now nftables.service
 systemctl enable --now pm-egress-allowlist.timer
 systemctl start pm-egress-allowlist.service # populate the sets now, don't wait for OnBootSec
-systemctl enable --now caddy.service
+# Caddy is RESTARTED, not `enable --now`ed: the Debian package auto-starts
+# caddy.service at install/boot BEFORE steps 7–8 exist, and a no-op start left
+# it running without PM_DOMAIN — site address "" ⇒ ":80 only, no automatic
+# HTTPS" (observed on first boot). A restart is cheap and graceful; issued
+# certificates are cached under /var/lib/caddy, so this never re-triggers ACME.
+systemctl enable caddy.service
+systemctl restart caddy.service
 systemctl enable --now pm-backend.service
 systemctl enable --now pm-strategy.service
 

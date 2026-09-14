@@ -159,6 +159,24 @@ resource "google_project_iam_member" "compute_agent_instance_admin" {
   member  = "serviceAccount:service-${data.google_project.current.number}@compute-system.iam.gserviceaccount.com"
 }
 
+# One VM = one attached identity (docs/11 §11.6 #1): the pm-strategy systemd
+# unit's Application Default Credentials resolve to the VM's service account,
+# i.e. pm-backend — so pm-backend also needs to READ the strategy engine's
+# read-only credentials bundle, or the unit crash-loops on PERMISSION_DENIED
+# (observed on first boot). This grants read access to that ONE secret only;
+# the backend SA gains nothing it did not already hold, and the strategy
+# process is still kept away from order/token secrets by code, lint,
+# policy.test.ts and the nftables egress allowlist — not by IAM, until the
+# strategy unit gets its own identity (upgrade paths in the comment above).
+resource "google_secret_manager_secret_iam_member" "backend_reads_strategy_creds" {
+  for_each = toset(local.strategy_secret_ids)
+
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.this[each.value].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.pm_backend.email}"
+}
+
 # Strategy: accessor on the READ-creds secret ONLY — no `for_each` over
 # `backend_secret_ids` here, ever. This is the literal implementation of
 # docs/11 §11.4 #3's "no Secret Manager access to order/token secrets."
