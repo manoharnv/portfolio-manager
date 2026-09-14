@@ -53,6 +53,13 @@ pnpm install --frozen-lockfile --filter '@pm/backend...' --filter '@pm/strategy.
 log "pnpm build (backend, strategy and their deps only)"
 pnpm --filter '@pm/backend...' --filter '@pm/strategy...' build
 
+# The VM's baked startup script is frozen (vm.tf ignores metadata_startup_script:
+# changing it would force-replace the VM). Re-running the checked-out
+# bootstrap.sh is the sanctioned way to ship unit/config/firewall/swap changes;
+# it is idempotent, and with the checkout present it never rebuilds.
+log "re-applying infra/vm/bootstrap.sh (units, configs, firewall, swap)"
+bash "${REPO_DIR}/infra/vm/bootstrap.sh"
+
 log "restarting pm-backend, pm-strategy"
 systemctl restart pm-backend.service pm-strategy.service
 

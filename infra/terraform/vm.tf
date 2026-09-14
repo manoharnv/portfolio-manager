@@ -79,6 +79,19 @@ resource "google_compute_instance" "pm_backend" {
   # deliberate `terraform apply` with this flipped to false first.
   deletion_protection = true
 
+  # The provider treats a changed `metadata_startup_script` as FORCE-NEW: an
+  # edit to bootstrap.sh would otherwise plan a destroy+recreate of the VM
+  # (blocked by deletion_protection, but a trap either way). The baked script
+  # only does its heavy first-boot work once, so drift here is harmless; ship
+  # bootstrap.sh changes by re-running it from the checkout on the box
+  # (`sudo bash /opt/pm/infra/vm/bootstrap.sh` — infra/scripts/deploy.sh does
+  # this), never by replacing the VM.
+  lifecycle {
+    # ssh-keys: `gcloud compute ssh` writes operator keys into instance metadata;
+    # without this, every apply would strip them and lock the operator out.
+    ignore_changes = [metadata_startup_script, metadata["ssh-keys"]]
+  }
+
   # Operating window (docs/08 §8.2): started/stopped by the instance schedule
   # below. Empty when the schedule is disabled (always-on mode).
   resource_policies = var.vm_schedule_enabled ? [google_compute_resource_policy.pm_backend_schedule[0].self_link] : []
