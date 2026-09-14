@@ -73,16 +73,21 @@ resource "google_monitoring_alert_policy" "backend_down" {
   conditions {
     display_name = "/health check failing"
     condition_threshold {
-      filter          = "resource.type=\"uptime_url\" AND metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND metric.label.\"check_id\"=\"${google_monitoring_uptime_check_config.backend_health[0].uptime_check_id}\""
-      comparison      = "COMPARISON_LT"
+      filter = "resource.type=\"uptime_url\" AND metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND metric.label.\"check_id\"=\"${google_monitoring_uptime_check_config.backend_health[0].uptime_check_id}\""
+      # Google's documented uptime-check alert shape: count the checker
+      # locations reporting FALSE (ALIGN_NEXT_OLDER keeps the BOOL value, so
+      # REDUCE_COUNT_FALSE is valid — ALIGN_FRACTION_TRUE would turn it into a
+      # DOUBLE and the API rejects the reducer) and fire when more than one
+      # location fails for 60 s.
+      comparison      = "COMPARISON_GT"
       threshold_value = 1
-      duration        = "180s"
+      duration        = "60s"
 
       aggregations {
-        alignment_period     = "60s"
-        per_series_aligner   = "ALIGN_FRACTION_TRUE"
+        alignment_period     = "300s"
+        per_series_aligner   = "ALIGN_NEXT_OLDER"
         cross_series_reducer = "REDUCE_COUNT_FALSE"
-        group_by_fields      = ["resource.label.host"]
+        group_by_fields      = ["resource.label.*"]
       }
 
       trigger {
@@ -260,11 +265,11 @@ resource "google_monitoring_alert_policy" "auth_expired_burst" {
   combiner     = "OR"
 
   conditions {
-    display_name = ">= 3 AUTH_EXPIRED in 5m"
+    display_name = "> 2 (i.e. >= 3) AUTH_EXPIRED in 5m"
     condition_threshold {
       filter          = "resource.type=\"gce_instance\" AND metric.type=\"logging.googleapis.com/user/${google_logging_metric.this["auth_expired"].name}\""
-      comparison      = "COMPARISON_GE" # the provider's spelling of ">="; GTE is rejected at plan time
-      threshold_value = 3
+      comparison      = "COMPARISON_GT" # the Monitoring API allows only LT/GT here — "> 2" is how ">= 3" is expressed
+      threshold_value = 2
       duration        = "0s"
 
       aggregations {
