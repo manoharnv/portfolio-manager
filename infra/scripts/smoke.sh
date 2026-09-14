@@ -36,24 +36,25 @@ if [[ -z "${ID_TOKEN}" ]]; then
 
 No ID token provided — skipping the authenticated /v1/session check.
 
-To mint a short-lived ID token for a TEST user via the Firebase Auth REST API
-(never do this with a real/production account, and never commit the output):
+The app signs in with Google/Apple only (no password users), so mint a
+short-lived (1 h) ID token for an allow-listed uid via a Firebase custom token:
 
-  curl -fsS -X POST \\
-    "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=<FIREBASE_WEB_API_KEY>" \\
-    -H 'Content-Type: application/json' \\
-    -d '{"email":"<TEST_USER_EMAIL>","password":"<TEST_USER_PASSWORD>","returnSecureToken":true}' \\
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["idToken"])'
+  PM_ID_TOKEN=\$(infra/scripts/mint-id-token.sh <PROJECT_ID> <FIREBASE_UID> <FIREBASE_WEB_API_KEY>) \\
+    infra/scripts/smoke.sh ${HOST}
 
-<FIREBASE_WEB_API_KEY> is the "Web API Key" on the Firebase console's
-Project Settings > General page (not a secret in the Secret Manager sense —
-it identifies the project, it doesn't authorize anything by itself — but
-still don't paste real values into a shared shell history). The test user
-must exist in Firebase Auth (Authentication > Users) and its uid must be in
-backend.env's ALLOWED_UIDS or /v1/session will correctly 403.
+One-time prerequisite: the operator needs roles/iam.serviceAccountTokenCreator
+on the backend service account (the Admin SDK signs the custom token through
+its signBlob; project Owner does NOT include that permission):
 
-Then re-run:
-  PM_ID_TOKEN=<the idToken value>  infra/scripts/smoke.sh ${HOST}
+  gcloud iam service-accounts add-iam-policy-binding \\
+    pm-backend@<PROJECT_ID>.iam.gserviceaccount.com \\
+    --member=user:<YOU> --role=roles/iam.serviceAccountTokenCreator --project=<PROJECT_ID>
+
+<FIREBASE_WEB_API_KEY> is the "Web API Key" on Project Settings > General
+(the same value as EXPO_PUBLIC_FIREBASE_API_KEY in apps/mobile/.env). It
+identifies the project and authorizes nothing by itself. The uid must be in
+backend.env's ALLOWED_UIDS or /v1/session will correctly 403. Never commit or
+paste the minted token anywhere.
 EOF
 	exit 0
 fi
