@@ -44,8 +44,19 @@ cd "${REPO_ROOT}"
 log "pnpm --filter @pm/core build"
 pnpm --filter @pm/core build
 
+# 2nd-gen functions keep their container images in Artifact Registry. Without
+# a cleanup policy `firebase deploy` exits NON-ZERO *after* a successful deploy
+# ("could not set up cleanup policy") — which, under `set -e`, used to abort
+# this script before the TTL step. Setting the policy is idempotent.
+log "firebase functions:artifacts:setpolicy (7-day image cleanup, asia-south1)"
+firebase functions:artifacts:setpolicy --project "${PROJECT_ID}" --location asia-south1 --days 7 --force
+
+# `--force` also lets a CI run remove functions deleted from source without a
+# prompt. FIRST DEPLOY NOTE: Firestore-triggered (Eventarc) functions can fail
+# once with "Permission denied while using the Eventarc Service Agent … it may
+# take a few minutes" — that is propagation, not a bug; re-run this script.
 log "firebase deploy --project ${PROJECT_ID} --only firestore:rules,firestore:indexes,functions"
-firebase deploy --project "${PROJECT_ID}" --only firestore:rules,firestore:indexes,functions
+firebase deploy --project "${PROJECT_ID}" --only firestore:rules,firestore:indexes,functions --force
 
 # TTL policies — NOT part of firestore.indexes.json, not touched by
 # `firebase deploy` (functions/README.md). `gcloud firestore fields ttls
