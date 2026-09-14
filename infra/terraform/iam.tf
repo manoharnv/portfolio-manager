@@ -126,12 +126,19 @@ resource "google_secret_manager_secret_iam_member" "backend_accessor" {
 # operator-entered and long-lived; nothing in apps/backend/src ever calls
 # `secrets.set` on them (grep confirms the only `secrets.set` call site is
 # `secretNames.accessToken` in services/session.ts).
+# `secretVersionManager` (not just `secretVersionAdder`): the backend adds a
+# fresh daily token version and then DESTROYS the previous ones
+# (apps/backend/src/adapters/secret-manager.ts `retireOtherVersions`), because
+# Secret Manager bills every non-destroyed version — without destroy rights the
+# daily refresh would accumulate ~60 paid versions a month. The role also grants
+# list/disable/enable on these same writable secrets only; still no access to
+# anything outside `backend_writable_secret_ids`.
 resource "google_secret_manager_secret_iam_member" "backend_version_adder" {
   for_each = toset(local.backend_writable_secret_ids)
 
   project   = var.project_id
   secret_id = google_secret_manager_secret.this[each.value].secret_id
-  role      = "roles/secretmanager.secretVersionAdder"
+  role      = "roles/secretmanager.secretVersionManager"
   member    = "serviceAccount:${google_service_account.pm_backend.email}"
 }
 

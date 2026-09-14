@@ -9,8 +9,8 @@
  * VERIFY-LIVE:
  *   - label keys must match `[a-z0-9_-]{0,63}`, so the ISO expiry is stored
  *     lower-cased with `:`/`.`/`+` replaced — `isoToLabel`/`labelToIso` below;
- *   - `addVersion` requires `secretmanager.versionAdder` on the secret, which is
- *     broader than the `secretAccessor` the VM has for read-only secrets.
+ *   - `set` needs `roles/secretmanager.secretVersionManager` on the secret (add +
+ *     destroy) — broader than the `secretAccessor` the VM has for read-only secrets.
  */
 
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
@@ -35,9 +35,48 @@ export interface SecretManagerStoreOptions {
   client?: SecretManagerServiceClient | undefined;
 }
 
+/** Secret Manager reports `state` as the enum name or its number; DESTROYED = 3. */
+function isDestroyed(state: unknown): boolean {
+  return state === 'DESTROYED' || state === 3;
+}
+
 export function createSecretManagerStore(options: SecretManagerStoreOptions): SecretStore {
   const client = options.client ?? new SecretManagerServiceClient();
   const secretName = (name: string): string => `projects/${options.projectId}/secrets/${name}`;
+
+  /**
+   * Destroy every other live version once a new one is in place.
+   *
+   * Secret Manager bills every ENABLED *or DISABLED* version ($0.06 per
+   * version-month after the first six project-wide). The daily broker-token
+   * refresh adds one version per day per broker, so without this the bill
+   * grows by ~$3.60 every month, forever. Only DESTROYED versions stop
+   * billing — so destroy, never merely disable.
+   *
+   * Best-effort by design: the new token is already durable at this point, and
+   * a cleanup failure (e.g. the VM's service account lacking
+   * `secretVersionManager` until the IAM change is applied) must not turn a
+   * successful broker login into a reported failure. Fail-safe: when the add
+   * response carries no version name we cannot tell old from new, so nothing
+   * is destroyed.
+   */
+  async function retireOtherVersions(
+    parent: string,
+    keep: string | null | undefined,
+  ): Promise<void> {
+    if (keep === undefined || keep === null || keep === '') return;
+    try {
+      const [versions] = await client.listSecretVersions({ parent });
+      for (const version of versions) {
+        const name = version.name;
+        if (name === undefined || name === null || name === keep) continue;
+        if (isDestroyed(version.state)) continue;
+        await client.destroySecretVersion({ name });
+      }
+    } catch {
+      // best-effort — see the doc comment above
+    }
+  }
 
   return {
     async get(name: string): Promise<SecretValue | undefined> {
@@ -61,19 +100,21 @@ export function createSecretManagerStore(options: SecretManagerStoreOptions): Se
     },
 
     async set(name: string, secret: SecretValue): Promise<void> {
-      await client.addSecretVersion({
-        parent: secretName(name),
+      const parent = secretName(name);
+      const [added] = await client.addSecretVersion({
+        parent,
         payload: { data: Buffer.from(secret.value, 'utf8') },
       });
       if (secret.expiresAt !== undefined) {
         await client.updateSecret({
           secret: {
-            name: secretName(name),
+            name: parent,
             labels: { [EXPIRES_AT_LABEL]: isoToLabel(secret.expiresAt) },
           },
           updateMask: { paths: ['labels'] },
         });
       }
+      await retireOtherVersions(parent, added?.name);
     },
   };
 }
