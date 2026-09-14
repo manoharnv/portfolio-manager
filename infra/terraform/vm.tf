@@ -142,7 +142,10 @@ resource "google_compute_resource_policy" "pm_backend_snapshot" {
     schedule {
       daily_schedule {
         days_in_cycle = 1
-        start_time    = "18:30" # 00:00 IST — after market close, before pre-open
+        # UTC, and the provider only accepts HH:00. 19:00 UTC = 00:30 IST: the
+        # VM has been stopped since 16:15 IST and won't start until 07:15 IST,
+        # so the disk is quiescent when the snapshot is taken.
+        start_time = "19:00"
       }
     }
     retention_policy {

@@ -263,7 +263,7 @@ resource "google_monitoring_alert_policy" "auth_expired_burst" {
     display_name = ">= 3 AUTH_EXPIRED in 5m"
     condition_threshold {
       filter          = "resource.type=\"gce_instance\" AND metric.type=\"logging.googleapis.com/user/${google_logging_metric.this["auth_expired"].name}\""
-      comparison      = "COMPARISON_GTE"
+      comparison      = "COMPARISON_GE" # the provider's spelling of ">="; GTE is rejected at plan time
       threshold_value = 3
       duration        = "0s"
 
