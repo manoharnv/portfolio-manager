@@ -6,7 +6,10 @@
  * code path a real request would.
  *
  * Security posture baked in here:
- *   - `/health` is the ONLY unauthenticated route.
+ *   - `/health` and Dhan's consent redirect (`GET /v1/auth/dhan/redirect`, sent
+ *     by Dhan's login page, not by the app) are the ONLY unauthenticated routes;
+ *     the redirect is still rate-limited by IP and only honoured while a login
+ *     this backend started is pending (services/session.ts).
  *   - Every other route: `Authorization: Bearer <Firebase ID token>` → uid, then
  *     an `ALLOWED_UIDS` allowlist check (empty list ⇒ 403 for everyone).
  *   - Per-uid rate limit, hard-capped well below broker OPS limits.
@@ -61,10 +64,25 @@ export interface AppDeps {
   clock: Clock;
 }
 
-/** The only route that answers without a token. */
-export const PUBLIC_PATHS: ReadonlySet<string> = new Set(['/health']);
+export const DHAN_REDIRECT_PATH = '/v1/auth/dhan/redirect';
+
+/** The routes that answer without a token. */
+export const PUBLIC_PATHS: ReadonlySet<string> = new Set(['/health', DHAN_REDIRECT_PATH]);
+/** The routes exempt from the rate limit — the redirect is NOT one of them. */
+const UNMETERED_PATHS: ReadonlySet<string> = new Set(['/health']);
+
+/**
+ * `APP_CALLBACK_URL` plus the outcome, e.g.
+ * `pm://broker-callback?broker=dhan&status=ok&expiresAt=…`. Built by hand
+ * because `URL` mangles custom schemes on some runtimes.
+ */
+export function appCallbackUrl(base: string, params: Record<string, string>): string {
+  const query = new URLSearchParams(params).toString();
+  return `${base}${base.includes('?') ? '&' : '?'}${query}`;
+}
 
 const BrokerParamSchema = z.object({ broker: z.enum(['dhan', 'kite']) });
+const DhanRedirectQuerySchema = z.object({ tokenId: z.string().min(1).max(512) });
 const IdParamSchema = z.object({ id: z.string().min(1) });
 
 const ExecuteBodySchema = z.object({
@@ -158,7 +176,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     timeWindow: deps.config.rateLimit.windowMs,
     hook: 'preValidation',
     keyGenerator: (request: FastifyRequest) => request.uid ?? request.ip,
-    allowList: (request: FastifyRequest) => PUBLIC_PATHS.has(pathOf(request)),
+    allowList: (request: FastifyRequest) => UNMETERED_PATHS.has(pathOf(request)),
     // The plugin *throws* whatever this returns, so it must be an Error that
     // carries the status through to the error handler below.
     errorResponseBuilder: (_request: FastifyRequest, context: { statusCode?: number }) =>
@@ -231,6 +249,40 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         .send(failureBody(result.reason, result.detail));
     }
     return result;
+  });
+
+  /**
+   * Dhan's consent redirect (docs/02 §2.8). Dhan's login page sends the user's
+   * browser here with `?tokenId=`; the exchange happens server-side and the
+   * browser is then bounced to the app's callback URL with a status. Whatever
+   * happens, the token never appears in this response, the URL or a log —
+   * and the browser is always sent back to the app, never left on an error
+   * page it cannot act on.
+   */
+  app.get(DHAN_REDIRECT_PATH, async (request, reply) => {
+    const bounce = (params: Record<string, string>): FastifyReply =>
+      reply.redirect(appCallbackUrl(deps.config.appCallbackUrl, { broker: 'dhan', ...params }), 302);
+
+    const query = DhanRedirectQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      deps.logger.warn({ path: DHAN_REDIRECT_PATH }, 'dhan consent redirect without a usable tokenId');
+      return bounce({ status: 'error', reason: 'INVALID_REQUEST' });
+    }
+    try {
+      const result = await deps.services.session.completeDhanRedirect(query.data.tokenId);
+      if (!result.ok) {
+        deps.logger.warn({ reason: result.reason }, 'dhan consent redirect refused');
+        return bounce({ status: 'error', reason: result.reason });
+      }
+      deps.logger.info({ expiresAt: result.expiresAt }, 'dhan session connected via consent');
+      return bounce({ status: 'ok', expiresAt: result.expiresAt });
+    } catch (err) {
+      deps.logger.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'dhan consent redirect failed',
+      );
+      return bounce({ status: 'error', reason: 'INTERNAL' });
+    }
   });
 
   for (const slice of ['holdings', 'positions', 'funds'] as const) {

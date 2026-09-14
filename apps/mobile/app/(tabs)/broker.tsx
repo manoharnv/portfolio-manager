@@ -57,8 +57,8 @@ export default function BrokerScreen() {
           ? 'Login cancelled'
           : result.reason === 'NO_REQUEST_TOKEN'
             ? 'No request token'
-            : result.reason === 'VERIFY_LIVE'
-              ? 'Not enabled yet'
+            : result.reason === 'LOGIN_FAILED'
+              ? 'Broker login failed'
               : describeReason(result.reason).title;
       setMessage({
         tone: result.reason === 'CANCELLED' ? 'warn' : 'danger',

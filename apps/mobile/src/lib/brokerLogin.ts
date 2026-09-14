@@ -3,10 +3,18 @@
  *
  * The whole point of this module is what it does *not* do: the app never holds
  * a broker credential. It asks the backend for a login URL (only the backend
- * has the api key), opens it in the system auth session, pulls the short-lived
- * `request_token` out of the redirect, POSTs it straight to
- * `/v1/auth/:broker/callback`, and drops it. Nothing is written to SecureStore,
- * AsyncStorage or a log on the way through.
+ * has the api key) and opens it in the system auth session. What comes back in
+ * the redirect decides the rest:
+ *
+ *   - Kite redirects into the app with a short-lived `request_token`; it is
+ *     POSTed straight to `/v1/auth/kite/callback` and dropped.
+ *   - Dhan never redirects into the app at all: its login page sends the
+ *     browser to the backend (`GET /v1/auth/dhan/redirect`), which does the
+ *     exchange itself and only then bounces the browser here with
+ *     `?status=ok&expiresAt=…` or `?status=error&reason=…`. The app just reads
+ *     the verdict.
+ *
+ * Nothing is written to SecureStore, AsyncStorage or a log on the way through.
  */
 import * as WebBrowser from 'expo-web-browser';
 import type { Broker } from '@pm/core';
@@ -17,8 +25,14 @@ export type BrokerLoginResult =
   | { ok: true; broker: Broker; expiresAt: string }
   | { ok: false; reason: 'CANCELLED'; detail: string }
   | { ok: false; reason: 'NO_REQUEST_TOKEN'; detail: string }
-  | { ok: false; reason: 'VERIFY_LIVE'; detail: string }
+  | { ok: false; reason: 'LOGIN_FAILED'; detail: string }
   | ({ ok: false } & Omit<ApiFailure, 'ok'>);
+
+function redirectParams(redirectUrl: string): URLSearchParams[] {
+  const query = redirectUrl.includes('?') ? redirectUrl.slice(redirectUrl.indexOf('?') + 1) : '';
+  const fragment = redirectUrl.includes('#') ? redirectUrl.slice(redirectUrl.indexOf('#') + 1) : '';
+  return [query, fragment].filter((s) => s !== '').map((s) => new URLSearchParams(s));
+}
 
 /**
  * Kite redirects with `?request_token=…&action=login&status=success`. The
@@ -26,17 +40,55 @@ export type BrokerLoginResult =
  * changing the casing must not silently look like "no token".
  */
 export function extractRequestToken(redirectUrl: string): string | undefined {
-  const query = redirectUrl.includes('?') ? redirectUrl.slice(redirectUrl.indexOf('?') + 1) : '';
-  const fragment = redirectUrl.includes('#') ? redirectUrl.slice(redirectUrl.indexOf('#') + 1) : '';
-  for (const source of [query, fragment]) {
-    if (source === '') continue;
-    const params = new URLSearchParams(source);
+  for (const params of redirectParams(redirectUrl)) {
     for (const key of ['request_token', 'requestToken', 'requestId']) {
       const value = params.get(key);
       if (value !== null && value !== '') return value;
     }
   }
   return undefined;
+}
+
+export type ServerCompletion =
+  | { status: 'ok'; expiresAt: string }
+  | { status: 'error'; reason: string };
+
+/**
+ * A login the backend finished by itself (Dhan): the redirect carries the
+ * verdict, not a token. `undefined` when the redirect is not of that kind.
+ */
+export function extractServerCompletion(redirectUrl: string): ServerCompletion | undefined {
+  for (const params of redirectParams(redirectUrl)) {
+    const status = params.get('status');
+    if (status === 'ok') {
+      const expiresAt = params.get('expiresAt');
+      return expiresAt === null || expiresAt === ''
+        ? { status: 'error', reason: 'MALFORMED_REDIRECT' }
+        : { status: 'ok', expiresAt };
+    }
+    if (status === 'error') {
+      return { status: 'error', reason: params.get('reason') ?? 'UNKNOWN' };
+    }
+  }
+  return undefined;
+}
+
+/** Backend redirect reasons (apps/backend services/session.ts) in plain words. */
+export function describeServerReason(reason: string): string {
+  switch (reason) {
+    case 'NO_PENDING_LOGIN':
+      return 'the login took too long or was not started from this app — tap Connect and try again';
+    case 'CLIENT_MISMATCH':
+      return 'the Dhan account that signed in is not the one configured for this backend';
+    case 'EXCHANGE_FAILED':
+      return 'Dhan did not accept the consent — try again';
+    case 'SECRET_MISSING':
+      return 'the backend has no Dhan API key, secret or client id configured';
+    case 'INVALID_REQUEST':
+      return 'Dhan redirected without a token id — try again';
+    default:
+      return `the broker login failed (${reason})`;
+  }
 }
 
 export interface BrokerLoginDeps {
@@ -47,41 +99,29 @@ export interface BrokerLoginDeps {
     | undefined;
 }
 
-async function resolveLoginUrl(
-  api: ApiClient,
-  broker: Broker,
-): Promise<{ url: string; verifyLive: boolean } | ApiFailure> {
+async function resolveLoginUrl(api: ApiClient, broker: Broker): Promise<string | ApiFailure> {
   const result = await api.loginUrl(broker);
-  if (result.ok) return { url: result.url, verifyLive: result.verifyLive };
+  if (result.ok) return result.url;
 
   // Degraded path only (docs/06 §6.6): a locally-configured template lets you
   // reach the broker's login page when the backend is unreachable. The callback
   // still has to go through the backend, so this cannot complete a login alone.
   const template = brokerLoginUrlTemplate(broker);
-  if (template !== undefined) return { url: template, verifyLive: true };
+  if (template !== undefined) return template;
   return result;
 }
 
-/**
- * Runs the whole flow. Returns the backend's `expiresAt` on success.
- *
- * Dhan is deliberately not completed here: its consent flow mints a *long-lived
- * access token* outside this process (apps/backend/src/services/session.ts,
- * `DHAN_CONSENT_URL_TEMPLATE`, `verifyLive: true`). Forwarding that through the
- * app would put a broker secret in the app, which docs/06 §6.7 forbids. The
- * consent page is opened and the flow stops there until the redirect shape is
- * confirmed against Dhan's partner docs — see README "VERIFY-LIVE".
- */
+/** Runs the whole flow. Returns the backend's `expiresAt` on success. */
 export async function runBrokerLogin(
   broker: Broker,
   deps: BrokerLoginDeps,
 ): Promise<BrokerLoginResult> {
   const resolved = await resolveLoginUrl(deps.api, broker);
-  if ('ok' in resolved) return resolved;
+  if (typeof resolved !== 'string') return resolved;
 
   const redirect = brokerRedirectUrl();
   const open = deps.openAuthSession ?? WebBrowser.openAuthSessionAsync;
-  const session = await open(resolved.url, redirect);
+  const session = await open(resolved, redirect);
 
   if (session.type !== 'success') {
     return {
@@ -91,22 +131,21 @@ export async function runBrokerLogin(
     };
   }
 
+  // Server-completed (Dhan): the verdict is in the redirect, nothing to send.
+  const completion = extractServerCompletion(session.url);
+  if (completion !== undefined) {
+    return completion.status === 'ok'
+      ? { ok: true, broker, expiresAt: completion.expiresAt }
+      : { ok: false, reason: 'LOGIN_FAILED', detail: describeServerReason(completion.reason) };
+  }
+
   const requestToken = extractRequestToken(session.url);
   if (requestToken === undefined) {
-    return resolved.verifyLive
-      ? {
-          ok: false,
-          reason: 'VERIFY_LIVE',
-          detail:
-            `${broker}'s redirect carried no request_token. Its consent flow mints the ` +
-            'access token outside the app, and the app will not carry a broker secret. ' +
-            'Confirm the redirect shape against the broker docs before enabling this.',
-        }
-      : {
-          ok: false,
-          reason: 'NO_REQUEST_TOKEN',
-          detail: 'the broker redirect carried no request_token — nothing was sent',
-        };
+    return {
+      ok: false,
+      reason: 'NO_REQUEST_TOKEN',
+      detail: 'the broker redirect carried no request_token — nothing was sent',
+    };
   }
 
   // Forwarded immediately; never persisted, never logged.

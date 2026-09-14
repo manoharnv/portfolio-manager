@@ -31,13 +31,15 @@ locals {
   ]
 
   # The subset the backend calls `secrets.set(...)` on at runtime, after the
-  # daily broker login exchange — apps/backend/src/services/session.ts line
-  # ~188 (`deps.secrets.set(secretNames.accessToken, ...)`). Grep confirms
-  # this is the ONLY `secrets.set` call site in apps/backend/src; apiKey,
-  # apiSecret and clientId are operator-entered and never rewritten by code.
+  # daily broker login exchange: the two access tokens
+  # (apps/backend/src/services/session.ts) and the strategy engine's read-creds
+  # secret it keeps in step with them (apps/backend/src/services/strategy-creds.ts,
+  # `STRATEGY_READ_CREDS_SECRET`). apiKey, apiSecret and clientId are
+  # operator-entered and never rewritten by code.
   backend_writable_secret_ids = [
     "dhan-access-token",
     "kite-access-token",
+    "pm-strategy-read-creds",
   ]
 
   # apps/strategy/src/index.ts `PM_BROKER_SECRET` env var holds this secret's

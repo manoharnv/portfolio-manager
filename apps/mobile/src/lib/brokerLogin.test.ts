@@ -1,6 +1,6 @@
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { extractRequestToken, runBrokerLogin } from './brokerLogin';
+import { extractRequestToken, extractServerCompletion, runBrokerLogin } from './brokerLogin';
 import { fakeApiClient } from '../test-utils';
 
 const REQUEST_TOKEN = 'rt_abc123';
@@ -20,6 +20,38 @@ describe('extractRequestToken', () => {
     expect(extractRequestToken('pm://broker-callback?status=cancelled')).toBeUndefined();
     expect(extractRequestToken('pm://broker-callback')).toBeUndefined();
     expect(extractRequestToken('pm://cb?request_token=')).toBeUndefined();
+  });
+});
+
+describe('extractServerCompletion', () => {
+  it('reads an ok verdict with its expiry', () => {
+    expect(
+      extractServerCompletion(
+        'pm://broker-callback?broker=dhan&status=ok&expiresAt=2026-02-04T09%3A00%3A00%2B05%3A30',
+      ),
+    ).toEqual({ status: 'ok', expiresAt: '2026-02-04T09:00:00+05:30' });
+  });
+
+  it('reads an error verdict and its reason', () => {
+    expect(
+      extractServerCompletion('pm://broker-callback?broker=dhan&status=error&reason=CLIENT_MISMATCH'),
+    ).toEqual({ status: 'error', reason: 'CLIENT_MISMATCH' });
+    expect(extractServerCompletion('pm://broker-callback?status=error')).toEqual({
+      status: 'error',
+      reason: 'UNKNOWN',
+    });
+  });
+
+  it('treats ok without an expiry as malformed rather than a login', () => {
+    expect(extractServerCompletion('pm://broker-callback?status=ok')).toEqual({
+      status: 'error',
+      reason: 'MALFORMED_REDIRECT',
+    });
+  });
+
+  it('is undefined for a Kite-style redirect', () => {
+    expect(extractServerCompletion(SUCCESS_REDIRECT)).toBeUndefined();
+    expect(extractServerCompletion('pm://broker-callback')).toBeUndefined();
   });
 });
 
@@ -118,27 +150,56 @@ describe('runBrokerLogin', () => {
     const result = await runBrokerLogin('kite', {
       api,
       openAuthSession: async () =>
-        ({ type: 'success', url: 'pm://broker-callback?status=ok' }) as never,
+        ({ type: 'success', url: 'pm://broker-callback?action=login' }) as never,
     });
     expect(result).toMatchObject({ ok: false, reason: 'NO_REQUEST_TOKEN' });
   });
 
-  it('stops at VERIFY_LIVE for a broker whose redirect shape is unconfirmed', async () => {
+  it('completes a server-side (Dhan) login from the redirect verdict without posting anything', async () => {
+    const completeLogin = jest.fn();
     const api = fakeApiClient({
       loginUrl: async () => ({
         ok: true,
         broker: 'dhan',
         url: 'https://auth.dhan.co/login/consentApp-login?consentAppId=x',
-        verifyLive: true,
+        verifyLive: false,
+      }),
+      completeLogin,
+    });
+    const result = await runBrokerLogin('dhan', {
+      api,
+      openAuthSession: async () =>
+        ({
+          type: 'success',
+          url: 'pm://broker-callback?broker=dhan&status=ok&expiresAt=2026-02-04T09%3A00%3A00%2B05%3A30',
+        }) as never,
+    });
+
+    expect(result).toEqual({ ok: true, broker: 'dhan', expiresAt: '2026-02-04T09:00:00+05:30' });
+    expect(completeLogin).not.toHaveBeenCalled();
+    expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
+  });
+
+  it('reports a server-side login failure in plain words', async () => {
+    const api = fakeApiClient({
+      loginUrl: async () => ({
+        ok: true,
+        broker: 'dhan',
+        url: 'https://auth.dhan.co/login/consentApp-login?consentAppId=x',
+        verifyLive: false,
       }),
     });
     const result = await runBrokerLogin('dhan', {
       api,
-      openAuthSession: async () => ({ type: 'success', url: 'pm://broker-callback?ok=1' }) as never,
+      openAuthSession: async () =>
+        ({
+          type: 'success',
+          url: 'pm://broker-callback?broker=dhan&status=error&reason=CLIENT_MISMATCH',
+        }) as never,
     });
 
-    expect(result).toMatchObject({ ok: false, reason: 'VERIFY_LIVE' });
-    expect((result as { detail: string }).detail).toContain('will not carry a broker secret');
+    expect(result).toMatchObject({ ok: false, reason: 'LOGIN_FAILED' });
+    expect((result as { detail: string }).detail).toContain('not the one configured');
   });
 
   it('surfaces the backend failure when no login URL can be obtained', async () => {

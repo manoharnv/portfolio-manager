@@ -26,6 +26,7 @@ import type { CancelResult } from '../services/cancel.js';
 import type { KillSwitchResult } from '../services/killswitch.js';
 import type {
   CompleteLoginResult,
+  DhanRedirectResult,
   LoginUrlResult,
   SessionStatusResult,
 } from '../services/session.js';
@@ -45,6 +46,10 @@ interface Stubs {
   sessionStatus: SessionStatusResult;
   loginUrl: LoginUrlResult;
   completeLogin: CompleteLoginResult;
+  dhanRedirect: DhanRedirectResult;
+  /** When set, the redirect service call throws it — exercises the bounce-on-error path. */
+  dhanRedirectThrows?: Error | undefined;
+  dhanRedirectCalls: string[];
   portfolio: PortfolioResult;
   sync: SyncResult;
   activeBroker: SetActiveBrokerResult;
@@ -89,6 +94,14 @@ function stubs(): Stubs {
       connected: true,
       expiresAt: '2026-01-14T00:30:00.000Z',
     },
+    dhanRedirect: {
+      ok: true,
+      broker: 'dhan',
+      uid: 'u1',
+      connected: true,
+      expiresAt: '2026-01-14T09:00:00+05:30',
+    },
+    dhanRedirectCalls: [],
     portfolio: {
       ok: true,
       at: MARKET_OPEN_NOW,
@@ -124,6 +137,11 @@ function servicesFrom(s: Stubs): Services {
       status: () => Promise.resolve(s.sessionStatus),
       loginUrl: () => Promise.resolve(s.loginUrl),
       completeLogin: () => Promise.resolve(s.completeLogin),
+      completeDhanRedirect: (tokenId) => {
+        s.dhanRedirectCalls.push(tokenId);
+        if (s.dhanRedirectThrows !== undefined) return Promise.reject(s.dhanRedirectThrows);
+        return Promise.resolve(s.dhanRedirect);
+      },
     },
     portfolio: { refresh: () => Promise.resolve(s.portfolio) },
     reconcile: {
@@ -464,6 +482,80 @@ describe('the other routes', () => {
       payload: {},
     });
     expect(res.statusCode).toBe(400);
+  });
+
+  it('maps a Dhan token posted to the callback route to 400 NOT_SUPPORTED', async () => {
+    s.completeLogin = { ok: false, reason: 'NOT_SUPPORTED', detail: 'use the redirect route' };
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/dhan/callback',
+      headers: AUTH,
+      payload: { accessToken: 'x', expiresAt: '2026-01-14T09:00:00+05:30' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().reason).toBe('NOT_SUPPORTED');
+  });
+});
+
+describe('GET /v1/auth/dhan/redirect (Dhan consent redirect)', () => {
+  const REDIRECT = '/v1/auth/dhan/redirect';
+
+  it('needs no token: Dhan sends the browser here, then it is bounced to the app with the outcome', async () => {
+    const res = await app.inject({ method: 'GET', url: `${REDIRECT}?tokenId=tok-1` });
+
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe(
+      'pm://broker-callback?broker=dhan&status=ok&expiresAt=2026-01-14T09%3A00%3A00%2B05%3A30',
+    );
+    expect(s.dhanRedirectCalls).toEqual(['tok-1']);
+    expect(res.body).not.toMatch(/token/i);
+  });
+
+  it('bounces a refusal to the app as status=error with the reason', async () => {
+    s.dhanRedirect = { ok: false, reason: 'CLIENT_MISMATCH', detail: 'wrong account' };
+    const res = await app.inject({ method: 'GET', url: `${REDIRECT}?tokenId=tok-1` });
+
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe(
+      'pm://broker-callback?broker=dhan&status=error&reason=CLIENT_MISMATCH',
+    );
+    expect(res.body).not.toContain('wrong account');
+  });
+
+  it('bounces a missing tokenId without calling the service', async () => {
+    const res = await app.inject({ method: 'GET', url: REDIRECT });
+
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe(
+      'pm://broker-callback?broker=dhan&status=error&reason=INVALID_REQUEST',
+    );
+    expect(s.dhanRedirectCalls).toEqual([]);
+  });
+
+  it('bounces an internal failure as INTERNAL instead of leaving the browser on an error page', async () => {
+    s.dhanRedirectThrows = new Error('secret manager exploded');
+    const res = await app.inject({ method: 'GET', url: `${REDIRECT}?tokenId=tok-1` });
+
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe('pm://broker-callback?broker=dhan&status=error&reason=INTERNAL');
+    expect(res.body).not.toContain('exploded');
+  });
+
+  it('honours APP_CALLBACK_URL', async () => {
+    await app.close();
+    app = await build({ config: makeBackendConfig({ appCallbackUrl: 'pmdev://cb?src=test' }) }, s);
+    const res = await app.inject({ method: 'GET', url: `${REDIRECT}?tokenId=tok-1` });
+    expect(res.headers.location).toMatch(/^pmdev:\/\/cb\?src=test&broker=dhan&status=ok&/);
+  });
+
+  it('is rate-limited by IP like every other route', async () => {
+    await app.close();
+    app = await build({ config: makeBackendConfig({ rateLimit: { max: 2, windowMs: 60_000 } }) }, s);
+    const codes: number[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      codes.push((await app.inject({ method: 'GET', url: `${REDIRECT}?tokenId=t${i}` })).statusCode);
+    }
+    expect(codes).toEqual([302, 302, 429]);
   });
 
   it.each(['holdings', 'positions', 'funds'] as const)('GET /v1/portfolio/%s', async (slice) => {

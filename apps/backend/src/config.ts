@@ -104,6 +104,17 @@ const RawConfigSchema = z.object({
    * strategy engine to read via file:// (docs/11 §11.4 #8). Empty ⇒ disabled.
    */
   INSTRUMENTS_CACHE_DIR: stringEnv(''),
+  /**
+   * Secret Manager id of the strategy engine's READ-creds secret, rewritten
+   * after every broker login (services/strategy-creds.ts). Blank ⇒ the default
+   * name; the sync itself is best-effort and never fails a login.
+   */
+  STRATEGY_READ_CREDS_SECRET: stringEnv('pm-strategy-read-creds'),
+  /**
+   * Where `GET /v1/auth/dhan/redirect` bounces the browser once Dhan's consent
+   * is consumed (`?broker=dhan&status=ok|error…` is appended). The app's scheme.
+   */
+  APP_CALLBACK_URL: stringEnv('pm://broker-callback'),
 
   RATE_LIMIT_MAX: intEnv(60, 1, 10_000),
   RATE_LIMIT_WINDOW_MS: intEnv(60_000, 100, 3_600_000),
@@ -132,6 +143,9 @@ export interface BackendConfig {
   staticIp: string;
   /** '' ⇒ no local instrument-master cache is written. */
   instrumentsCacheDir: string;
+  /** Secret id the login flow rewrites for the engine; '' (tests only) ⇒ never. */
+  strategyReadCredsSecret: string;
+  appCallbackUrl: string;
   rateLimit: { max: number; windowMs: number };
   reconcileIntervalMs: number;
   portfolioRefreshIntervalMs: number;
@@ -198,6 +212,8 @@ export function parseConfig(env: Env): BackendConfig {
     allowedUids: raw.ALLOWED_UIDS,
     staticIp: raw.STATIC_IP,
     instrumentsCacheDir: raw.INSTRUMENTS_CACHE_DIR,
+    strategyReadCredsSecret: raw.STRATEGY_READ_CREDS_SECRET,
+    appCallbackUrl: raw.APP_CALLBACK_URL,
     rateLimit: { max: raw.RATE_LIMIT_MAX, windowMs: raw.RATE_LIMIT_WINDOW_MS },
     reconcileIntervalMs: raw.RECONCILE_INTERVAL_MS,
     portfolioRefreshIntervalMs: raw.PORTFOLIO_REFRESH_INTERVAL_MS,

@@ -27,6 +27,7 @@ import {
 import { parseConfig } from './config.js';
 import { createLogger } from './logger.js';
 import { DHAN_CACHE_FILE, KITE_CACHE_FILE, writeInstrumentCache } from './instruments-cache.js';
+import { createStrategyCredsSync } from './services/strategy-creds.js';
 import { createFirebaseTokenVerifier } from './adapters/firebase-auth.js';
 import { createSecretManagerStore } from './adapters/secret-manager.js';
 import {
@@ -200,6 +201,14 @@ async function main(): Promise<void> {
   });
   const portfolio = createPortfolioService({ broker, cache: portfolioCache, clock, audit });
 
+  // Keeps the strategy engine's read-creds secret in step with every broker
+  // login and active-broker switch (services/strategy-creds.ts).
+  const strategyCreds = createStrategyCredsSync({
+    secrets,
+    secretName: config.strategyReadCredsSecret,
+    logger,
+  });
+
   const app = await buildApp({
     config,
     logger,
@@ -212,7 +221,7 @@ async function main(): Promise<void> {
       reject: createRejectService({ proposals, audit, clock }),
       cancel: createCancelService({ orders, broker, audit, clock }),
       killswitch: createKillSwitchService({ configs, audit, clock }),
-      activeBroker: createActiveBrokerService({ configs, sessions, audit, clock }),
+      activeBroker: createActiveBrokerService({ configs, sessions, audit, clock, strategyCreds }),
       quotes: createQuotesService({ broker }),
       strategies: createStrategiesService({ defs: strategyDefs, audit }),
       session: createSessionService({
@@ -221,8 +230,11 @@ async function main(): Promise<void> {
         audit,
         clock,
         http: kiteHttp,
+        dhanHttp,
         secretNames: config.secrets,
         activeBrokerFor: async (uid) => (await configs.get(uid))?.activeBroker,
+        strategyCreds,
+        logger,
       }),
     },
   });

@@ -5,13 +5,13 @@
  * token** is minted; the backend renews it once per trading day. This module is
  * the machine half of that flow.
  *
- * The *interactive* half — opening Dhan's consent screen in the app, carrying
- * the consent/`request_token` back to the backend and exchanging it with the
- * api_secret — is deliberately NOT implemented here: the app must never see the
- * secret or the token (docs/02 §2.8). The hook point for it is
- * {@link DhanSession}: whatever performs the consent exchange writes the
- * resulting session into Secret Manager, and the adapter is constructed with a
- * `() => DhanSession` accessor that reads it back.
+ * The *consent* half — generating a consent with the api key/secret, sending
+ * the user's browser to Dhan's login page, and exchanging the `tokenId` Dhan
+ * redirects back with — lives in `consent.ts`. Only the execution backend runs
+ * it: the app must never see the secret or the token (docs/02 §2.8). Whatever
+ * performs the exchange writes the resulting {@link DhanSession} into Secret
+ * Manager, and the adapter is constructed with a `() => DhanSession` accessor
+ * that reads it back.
  */
 
 import { BrokerError, SESSION_EXPIRY_MARGIN_SECONDS, type SessionStatus } from '@pm/core';
@@ -55,7 +55,8 @@ export interface RenewTokenOptions {
 }
 
 const TOKEN_KEYS = ['accessToken', 'access_token', 'token', 'jwt'] as const;
-const EXPIRY_KEYS = [
+/** Every spelling of "when does this token die" seen across Dhan's auth responses. */
+export const EXPIRY_KEYS = [
   'expiresAt',
   'expires_at',
   'expiryTime',
@@ -65,7 +66,8 @@ const EXPIRY_KEYS = [
   'expiry',
 ] as const;
 
-function readExpiry(value: unknown, context: string): string | undefined {
+/** An expiry field (IST wall-clock string, ISO, or epoch) → ISO with offset. */
+export function readExpiry(value: unknown, context: string): string | undefined {
   if (typeof value === 'string' && value.trim().length > 0) {
     return dhanTimeToIso(value, context);
   }

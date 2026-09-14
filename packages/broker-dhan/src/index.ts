@@ -21,5 +21,6 @@ export * from './errors.js';
 export * from './wire.js';
 export * from './instruments.js';
 export * from './auth.js';
+export * from './consent.js';
 export * from './adapter.js';
 export * from './register.js';

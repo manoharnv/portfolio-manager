@@ -15,6 +15,7 @@ import type { Broker, Config } from '@pm/core';
 import { sessionRefusal, toSessionStatus } from '../session-status.js';
 import type { Clock, ConfigRepo, SessionStore } from '../ports/index.js';
 import type { AuditWriter } from './audit.js';
+import type { StrategyCredsSync } from './strategy-creds.js';
 
 export interface SetActiveBrokerInput {
   uid: string;
@@ -34,6 +35,8 @@ export interface ActiveBrokerDeps {
   sessions: SessionStore;
   audit: AuditWriter;
   clock: Clock;
+  /** Re-points the strategy engine's read-creds at the new broker; optional in tests. */
+  strategyCreds?: StrategyCredsSync | undefined;
 }
 
 export interface ActiveBrokerService {
@@ -84,6 +87,8 @@ export function createActiveBrokerService(deps: ActiveBrokerDeps): ActiveBrokerS
         actor: 'app-user',
         detail: { field: 'activeBroker', from: current.activeBroker, to: next.activeBroker },
       });
+      // Best-effort (services/strategy-creds.ts): the switch itself is done.
+      await deps.strategyCreds?.setActive(next.activeBroker);
       return { ok: true, activeBroker: next.activeBroker };
     },
   };

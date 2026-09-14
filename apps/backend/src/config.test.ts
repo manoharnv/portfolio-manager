@@ -56,6 +56,18 @@ describe('parseConfig', () => {
     ).toBe('/var/lib/pm/instruments');
   });
 
+  it('defaults the strategy read-creds secret and the app callback URL (blank ⇒ default)', () => {
+    const config = parseConfig({});
+    expect(config.strategyReadCredsSecret).toBe('pm-strategy-read-creds');
+    expect(config.appCallbackUrl).toBe('pm://broker-callback');
+    expect(parseConfig({ STRATEGY_READ_CREDS_SECRET: '' }).strategyReadCredsSecret).toBe(
+      'pm-strategy-read-creds',
+    );
+    expect(
+      parseConfig({ STRATEGY_READ_CREDS_SECRET: 'other', APP_CALLBACK_URL: 'pmdev://cb' }),
+    ).toMatchObject({ strategyReadCredsSecret: 'other', appCallbackUrl: 'pmdev://cb' });
+  });
+
   it('allows a blank STATIC_IP outside prod', () => {
     expect(parseConfig({ ENVIRONMENT: 'dry-run' }).staticIp).toBe('');
   });
