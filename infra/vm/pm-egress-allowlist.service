@@ -1,0 +1,35 @@
+# infra/vm/pm-egress-allowlist.service — runs egress-allowlist.sh once.
+# Triggered at boot (via pm-strategy.service's Requires=/After=) and every
+# 10 minutes by pm-egress-allowlist.timer (docs/01 §1.5, docs/08 §8.2: "the
+# strategy user's egress allowlist"). Installed to
+# /etc/systemd/system/pm-egress-allowlist.service by bootstrap.sh.
+#
+# oneshot + RemainAfterExit=yes: `systemctl is-active` reports this unit as
+# active/succeeded between timer firings, which is what lets
+# pm-strategy.service's `Requires=pm-egress-allowlist.service` mean "the
+# allowlist has been populated at least once," not "is populating right
+# now."
+
+[Unit]
+Description=Refresh the pm-strategy nftables egress allowlist (resolve hostnames -> IP sets)
+After=network-online.target nftables.service
+Wants=network-online.target
+Requisite=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/pm/infra/vm/egress-allowlist.sh
+# Needs CAP_NET_ADMIN for `nft`; nothing else. Runs as root deliberately
+# (this is infrastructure the pm-strategy user must NOT be able to alter —
+# if pm-strategy could rewrite its own allowlist, the control would be
+# worthless).
+User=root
+Group=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# No ReadWritePaths: egress-allowlist.sh only talks to the kernel via nft's
+# netlink socket (not a filesystem write) and writes its scratch nft script
+# under PrivateTmp's isolated /tmp.

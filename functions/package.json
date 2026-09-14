@@ -1,0 +1,33 @@
+{
+  "name": "@pm/functions",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Firebase Cloud Functions (2nd gen): proposal→FCM push, proposal expiry, order reconciliation triggers. NEVER holds broker order credentials. See docs/08 §8.4.",
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/index.js --external:firebase-admin --external:firebase-functions --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "lint": "eslint src",
+    "clean": "rm -rf dist .turbo coverage"
+  },
+  "dependencies": {
+    "@pm/core": "workspace:*",
+    "firebase-admin": "^13.0.0",
+    "firebase-functions": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^5.0.0",
+    "esbuild": "^0.28.0",
+    "eslint": "^10.10.0",
+    "firebase-functions-test": "^3.0.0",
+    "typescript": "5.9.3",
+    "vitest": "^5.0.0"
+  }
+}

@@ -28,8 +28,8 @@ once, from the static IP — or refuse.**
 
 ## 4.3 REST API (v1)
 
-All endpoints require `Authorization: Bearer <Firebase ID token>` (verified via Admin
-SDK). Responses are JSON. Base path `/v1`.
+All endpoints except `/health` and `/auth/:broker/redirect` require `Authorization: Bearer
+<Firebase ID token>` (verified via Admin SDK). Responses are JSON. Base path `/v1`.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -37,6 +37,7 @@ SDK). Responses are JSON. Base path `/v1`.
 | `GET` | `/session` | per-broker session status (connected, expiry, ipOk) |
 | `POST` | `/auth/:broker/login-url` | get broker login URL for daily re-auth |
 | `POST` | `/auth/:broker/callback` | exchange request_token/consent → store daily token |
+| `GET` | `/auth/:broker/redirect` | **no auth** — the broker's login page sends the browser here (Dhan `?tokenId=`, Kite `?request_token=&state=`); the backend does the exchange, checks the account, stores the token, then 302s to the app's `pm://broker-callback?broker=…&status=ok\|error` |
 | `GET` | `/portfolio/holdings` \| `/positions` \| `/funds` | proxied/cached reads |
 | `POST` | `/proposals/:id/execute` | **approve + place** (the critical path) |
 | `POST` | `/proposals/:id/reject` | reject a proposal |

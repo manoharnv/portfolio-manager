@@ -19,6 +19,9 @@ proven**. Every phase is independently useful.
 - Backend read endpoints + cached `portfolio/*` read model.
 - **Books + ledger foundations** (read-side): capital sleeves + position attribution
   ([10-multi-strategy.md](10-multi-strategy.md) §10.3–10.4).
+- **Seed the operator-owned documents** (`config`, `users`, `books`, `strategies/defs`,
+  `brokerSessions`) with `apps/strategy/scripts/seed-user.ts` — schema-validated,
+  create-only, inert defaults (dry-run, trading off, strategies off).
 - App: Firebase Auth, Dashboard (holdings, P&L, session status, per-book view), Broker
   Connect.
 - **Exit:** you log in, connect Dhan, see live holdings attributed to books. Zero order
@@ -66,6 +69,11 @@ proven**. Every phase is independently useful.
   ([10](10-multi-strategy.md) §10.7).
 - **Claude-reasoned routine** with restricted `writeProposal`-only toolset (proposals
   only — never in any auto-exec path).
+- **Pre-market routine (07:15–09:00 IST)** — the VM is always on, so the two hours
+  before the bell are available for this: review overnight global markets and news,
+  set up the day's strategy parameters, and stage opening-gap proposals for the 09:15
+  open. Needs a new `pre-market` tick in the engine; today only the 09:00 `pre-open`
+  hook exists. Same boundary as everything else: proposals only.
 - Richer analytics (XIRR, drawdown, per-book P&L, allocation, dividends), reports,
   kill-switch drills.
 - **Exit:** all four horizons coexisting under books + coordinator + risk manager, all

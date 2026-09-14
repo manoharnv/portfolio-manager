@@ -60,3 +60,7 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 *.swp
+
+# ---- Claude Code local settings / runtime ----
+.claude/settings.local.json
+.claude/*.lock
