@@ -24,6 +24,11 @@ hostnames and are not interchangeable.
 
 - `gcloud` CLI, authenticated (`gcloud auth login`) as a user/account with
   Organization- or Billing-Account-level rights to create a new project.
+  **On macOS, point it at Python ≥ 3.10** — the Xcode `python3` is 3.9 and
+  makes `gcloud compute ssh` crash (`CommandLoadFailure … 'type' | 'NoneType'`);
+  gcloud's own auto-installer needs sudo and can fail. Install the latest stable
+  Python with Homebrew and pin it:
+  `brew install python@3.13 && echo 'export CLOUDSDK_PYTHON=$(brew --prefix python@3.13)/bin/python3.13' >> ~/.zshrc`.
 - `firebase` CLI (`npm install -g firebase-tools`), `firebase login`.
 - `terraform` >= 1.6 (or `tofu` >= 1.6 — this module was authored and
   `validate`d with OpenTofu 1.12 against `hashicorp/google` 6.50.0).
