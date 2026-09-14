@@ -34,7 +34,7 @@ resource "google_monitoring_notification_channel" "email" {
 # (Caddy terminates TLS on 443 and reverse-proxies to the backend's
 # `config.port`, default 8080, on 127.0.0.1 only).
 #
-# ALWAYS-ON MODE ONLY (`vm_schedule_enabled = false`). In the default scheduled
+# ALWAYS-ON MODE (the default, `vm_schedule_enabled = false`). In the optional scheduled
 # mode the VM is intentionally off ~15 h/day, so a 24/7 uptime check would
 # page every evening and train you to ignore it — see `window_health` below.
 resource "google_monitoring_uptime_check_config" "backend_health" {
@@ -104,7 +104,7 @@ resource "google_monitoring_alert_policy" "backend_down" {
   }
 }
 
-# SCHEDULED MODE (default): "is the backend up when it is supposed to be?"
+# SCHEDULED MODE (optional, `vm_schedule_enabled = true`): "is the backend up when it should be?"
 # A Cloud Scheduler job GETs /health 30 min after the scheduled VM start
 # (boot + service start take ~2 min on an e2-micro; 3 retries a minute apart
 # absorb a slow morning), and a log-based alert fires when the job itself
