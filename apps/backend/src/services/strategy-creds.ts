@@ -76,12 +76,14 @@ export function createStrategyCredsSync(deps: StrategyCredsSyncDeps): StrategyCr
     }
   }
 
-  async function write(next: BrokerCreds, expiresAt: string | undefined): Promise<'written' | 'failed'> {
+  /**
+   * Written bare — no `expiresAt` on the SecretValue — so the engine can parse
+   * the payload straight into `BrokerCreds` (each broker's own `expiresAt` is
+   * inside the JSON already).
+   */
+  async function write(next: BrokerCreds): Promise<'written' | 'failed'> {
     try {
-      await deps.secrets.set(deps.secretName, {
-        value: JSON.stringify(next),
-        ...(expiresAt === undefined ? {} : { expiresAt }),
-      });
+      await deps.secrets.set(deps.secretName, { value: JSON.stringify(next) });
       return 'written';
     } catch (err) {
       deps.logger?.warn(
@@ -103,8 +105,7 @@ export function createStrategyCredsSync(deps: StrategyCredsSyncDeps): StrategyCr
         ...(dhan === undefined ? {} : { dhan }),
         ...(kite === undefined ? {} : { kite }),
       };
-      const fresh = input.broker === 'dhan' ? input.dhan : input.kite;
-      return write(next, fresh?.expiresAt);
+      return write(next);
     },
 
     async setActive(broker: Broker): Promise<StrategyCredsSyncOutcome> {
@@ -118,7 +119,7 @@ export function createStrategyCredsSync(deps: StrategyCredsSyncDeps): StrategyCr
         );
         return 'skipped';
       }
-      return write({ broker, ...current }, creds.expiresAt);
+      return write({ broker, ...current });
     },
   };
 }

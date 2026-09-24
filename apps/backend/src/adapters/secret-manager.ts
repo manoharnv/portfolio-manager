@@ -1,38 +1,69 @@
 /**
  * {@link SecretStore} backed by Google Secret Manager — docs/04 §4.9.
  *
- * Thin on purpose: no caching, no decision-making. The daily access token's
- * expiry rides along as a Secret Manager **label** on the version's parent
- * secret, because a secret payload should stay opaque and a label is the only
- * metadata the accessor role can read back cheaply.
+ * Thin on purpose: no caching, no decision-making. A daily access token's
+ * expiry travels **inside the payload**, as a small marked JSON envelope
+ * (`{"__pm":1,"value":…,"expiresAt":…}`), because the roles the VM actually
+ * holds cannot read or write secret metadata:
  *
- * VERIFY-LIVE:
- *   - label keys must match `[a-z0-9_-]{0,63}`, so the ISO expiry is stored
- *     lower-cased with `:`/`.`/`+` replaced — `isoToLabel`/`labelToIso` below;
- *   - `set` needs `roles/secretmanager.secretVersionManager` on the secret (add +
- *     destroy) — broader than the `secretAccessor` the VM has for read-only secrets.
+ *   - `roles/secretmanager.secretAccessor` is `versions.access` and nothing
+ *     else — no `secrets.get`, so a label on the secret is invisible;
+ *   - `roles/secretmanager.secretVersionManager` adds/lists/destroys versions
+ *     but has no `secrets.update`, so a label could not be written either.
+ *
+ * (Observed live on 2026-09-24: with labels every `get` failed closed as
+ * "not set" — docs/11 §11.5.) Operator-entered secrets (api keys, client ids)
+ * are plain strings and come back as-is; only what this backend writes with an
+ * expiry is enveloped, and the strategy engine's read-creds secret is written
+ * bare so the engine can parse it directly.
  */
 
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import type { SecretStore, SecretValue } from '../ports/index.js';
 
-export const EXPIRES_AT_LABEL = 'expires-at';
-
-/** ISO-8601 → a Secret Manager label value (`[a-z0-9_-]{0,63}`). */
-export function isoToLabel(iso: string): string {
-  return iso.toLowerCase().replace(/[:.+]/g, '-');
-}
-
-/** Inverse of {@link isoToLabel} for the shapes this backend writes. */
-export function labelToIso(label: string): string | undefined {
-  const m = /^(\d{4})-(\d{2})-(\d{2})t(\d{2})-(\d{2})-(\d{2})-(\d{3})z$/.exec(label);
-  if (m === null) return undefined;
-  return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}.${m[7]}Z`;
-}
-
 export interface SecretManagerStoreOptions {
   projectId: string;
   client?: SecretManagerServiceClient | undefined;
+}
+
+const ENVELOPE_MARK = 1;
+
+interface Envelope {
+  __pm: typeof ENVELOPE_MARK;
+  value: string;
+  expiresAt: string;
+}
+
+/** Payload text for a value, enveloped only when it carries an expiry. */
+export function encodePayload(secret: SecretValue): string {
+  if (secret.expiresAt === undefined) return secret.value;
+  const envelope: Envelope = {
+    __pm: ENVELOPE_MARK,
+    value: secret.value,
+    expiresAt: secret.expiresAt,
+  };
+  return JSON.stringify(envelope);
+}
+
+/** Inverse of {@link encodePayload}; anything not carrying the mark is a plain value. */
+export function decodePayload(text: string): SecretValue {
+  if (!text.startsWith('{')) return { value: text };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { value: text };
+  }
+  if (typeof parsed !== 'object' || parsed === null) return { value: text };
+  const record = parsed as Record<string, unknown>;
+  if (
+    record['__pm'] !== ENVELOPE_MARK ||
+    typeof record['value'] !== 'string' ||
+    typeof record['expiresAt'] !== 'string'
+  ) {
+    return { value: text };
+  }
+  return { value: record['value'], expiresAt: record['expiresAt'] };
 }
 
 /** Secret Manager reports `state` as the enum name or its number; DESTROYED = 3. */
@@ -86,12 +117,7 @@ export function createSecretManagerStore(options: SecretManagerStoreOptions): Se
         });
         const payload = version.payload?.data;
         if (payload === null || payload === undefined) return undefined;
-        const value = Buffer.from(payload as Uint8Array).toString('utf8');
-
-        const [secret] = await client.getSecret({ name: secretName(name) });
-        const label = secret.labels?.[EXPIRES_AT_LABEL];
-        const expiresAt = typeof label === 'string' ? labelToIso(label) : undefined;
-        return expiresAt === undefined ? { value } : { value, expiresAt };
+        return decodePayload(Buffer.from(payload as Uint8Array).toString('utf8'));
       } catch {
         // A missing secret is indistinguishable from a permission error here,
         // and both mean the same thing to the caller: no usable credential.
@@ -103,17 +129,8 @@ export function createSecretManagerStore(options: SecretManagerStoreOptions): Se
       const parent = secretName(name);
       const [added] = await client.addSecretVersion({
         parent,
-        payload: { data: Buffer.from(secret.value, 'utf8') },
+        payload: { data: Buffer.from(encodePayload(secret), 'utf8') },
       });
-      if (secret.expiresAt !== undefined) {
-        await client.updateSecret({
-          secret: {
-            name: parent,
-            labels: { [EXPIRES_AT_LABEL]: isoToLabel(secret.expiresAt) },
-          },
-          updateMask: { paths: ['labels'] },
-        });
-      }
       await retireOtherVersions(parent, added?.name);
     },
   };

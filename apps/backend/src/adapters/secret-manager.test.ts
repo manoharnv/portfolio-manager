@@ -1,11 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SecretManagerServiceClient } from '@google-cloud/secret-manager';
-import {
-  EXPIRES_AT_LABEL,
-  createSecretManagerStore,
-  isoToLabel,
-  labelToIso,
-} from './secret-manager.js';
+import { createSecretManagerStore, decodePayload, encodePayload } from './secret-manager.js';
 
 interface FakeVersion {
   name: string;
@@ -13,11 +8,15 @@ interface FakeVersion {
   value: string;
 }
 
-/** The six calls the store makes — no GCP client, no network. */
+/**
+ * The four calls the store may make — no GCP client, no network. `getSecret`
+ * and `updateSecret` throw on purpose: the VM's roles (`secretAccessor`,
+ * `secretVersionManager`) do not carry `secrets.get` / `secrets.update`, so
+ * the store must never depend on them.
+ */
 class FakeSecretClient {
   /** latest value per secret (what `versions/latest` resolves to) */
   readonly versions = new Map<string, string>();
-  readonly labels = new Map<string, Record<string, string>>();
   readonly added: { parent: string; value: string }[] = [];
   /** every version ever added, per secret, with its lifecycle state */
   readonly history = new Map<string, FakeVersion[]>();
@@ -35,8 +34,12 @@ class FakeSecretClient {
     return Promise.resolve([{ payload: { data: Buffer.from(value, 'utf8') } }]);
   }
 
-  getSecret(req: { name: string }): Promise<[unknown]> {
-    return Promise.resolve([{ labels: this.labels.get(req.name) }]);
+  getSecret(): Promise<[unknown]> {
+    return Promise.reject(new Error('PERMISSION_DENIED: secretmanager.secrets.get'));
+  }
+
+  updateSecret(): Promise<[unknown]> {
+    return Promise.reject(new Error('PERMISSION_DENIED: secretmanager.secrets.update'));
   }
 
   addSecretVersion(req: { parent: string; payload: { data: Buffer } }): Promise<[unknown]> {
@@ -74,13 +77,6 @@ class FakeSecretClient {
       .filter((v) => v.state !== 'DESTROYED')
       .map((v) => v.name);
   }
-
-  updateSecret(req: {
-    secret: { name: string; labels: Record<string, string> };
-  }): Promise<[unknown]> {
-    this.labels.set(req.secret.name, req.secret.labels);
-    return Promise.resolve([{}]);
-  }
 }
 
 function setup(): { client: FakeSecretClient; store: ReturnType<typeof createSecretManagerStore> } {
@@ -92,44 +88,62 @@ function setup(): { client: FakeSecretClient; store: ReturnType<typeof createSec
   return { client, store };
 }
 
-describe('isoToLabel / labelToIso', () => {
-  it('round-trips an ISO instant through a label-safe form', () => {
-    const iso = '2026-01-14T00:30:00.000Z';
-    const label = isoToLabel(iso);
-
-    expect(label).toMatch(/^[a-z0-9_-]{0,63}$/);
-    expect(labelToIso(label)).toBe(iso);
+describe('encodePayload / decodePayload', () => {
+  it('leaves a value without expiry as the bare string', () => {
+    expect(encodePayload({ value: 'api-key' })).toBe('api-key');
+    expect(decodePayload('api-key')).toEqual({ value: 'api-key' });
   });
 
-  it('returns undefined for a label it did not write', () => {
-    expect(labelToIso('whenever')).toBeUndefined();
-    expect(labelToIso('')).toBeUndefined();
+  it('envelopes a value with its expiry and round-trips it', () => {
+    const text = encodePayload({ value: 'daily-token', expiresAt: '2026-01-14T00:30:00.000Z' });
+    expect(JSON.parse(text)).toEqual({
+      __pm: 1,
+      value: 'daily-token',
+      expiresAt: '2026-01-14T00:30:00.000Z',
+    });
+    expect(decodePayload(text)).toEqual({
+      value: 'daily-token',
+      expiresAt: '2026-01-14T00:30:00.000Z',
+    });
+  });
+
+  it('treats JSON that is not its own envelope as a plain value (e.g. the engine read-creds)', () => {
+    const creds = JSON.stringify({ broker: 'dhan', dhan: { clientId: '1', accessToken: 't' } });
+    expect(decodePayload(creds)).toEqual({ value: creds });
+    expect(decodePayload('{"value":"x","expiresAt":"y"}')).toEqual({
+      value: '{"value":"x","expiresAt":"y"}',
+    });
+    expect(decodePayload('{not json')).toEqual({ value: '{not json' });
+    expect(decodePayload('[1,2]')).toEqual({ value: '[1,2]' });
   });
 });
 
 describe('createSecretManagerStore', () => {
-  it('writes a version and stamps the expiry as a label', async () => {
+  it('writes a version carrying the expiry inside the payload — never a label', async () => {
     const { client, store } = setup();
     await store.set('dhan-access-token', {
       value: 'daily-token',
       expiresAt: '2026-01-14T00:30:00.000Z',
     });
 
-    expect(client.added).toEqual([
-      { parent: 'projects/proj/secrets/dhan-access-token', value: 'daily-token' },
-    ]);
-    expect(client.labels.get('projects/proj/secrets/dhan-access-token')).toEqual({
-      [EXPIRES_AT_LABEL]: isoToLabel('2026-01-14T00:30:00.000Z'),
+    expect(client.added).toHaveLength(1);
+    expect(client.added[0]?.parent).toBe('projects/proj/secrets/dhan-access-token');
+    expect(JSON.parse(client.added[0]?.value ?? '')).toEqual({
+      __pm: 1,
+      value: 'daily-token',
+      expiresAt: '2026-01-14T00:30:00.000Z',
     });
   });
 
-  it('skips the label write when there is no expiry', async () => {
+  it('writes a bare payload when there is no expiry', async () => {
     const { client, store } = setup();
-    await store.set('dhan-api-key', { value: 'long-lived' });
-    expect(client.labels.size).toBe(0);
+    await store.set('pm-strategy-read-creds', { value: '{"broker":"dhan"}' });
+    expect(client.added).toEqual([
+      { parent: 'projects/proj/secrets/pm-strategy-read-creds', value: '{"broker":"dhan"}' },
+    ]);
   });
 
-  it('reads a secret back with its expiry', async () => {
+  it('reads a secret back with its expiry using versions.access alone', async () => {
     const { store } = setup();
     await store.set('kite-access-token', {
       value: 'kite-token',
@@ -142,9 +156,9 @@ describe('createSecretManagerStore', () => {
     });
   });
 
-  it('reads a secret with no expiry label as having none', async () => {
-    const { store } = setup();
-    await store.set('kite-api-key', { value: 'key' });
+  it('reads an operator-entered plain secret as having no expiry', async () => {
+    const { client, store } = setup();
+    client.versions.set('projects/proj/secrets/kite-api-key', 'key');
     expect(await store.get('kite-api-key')).toEqual({ value: 'key' });
   });
 

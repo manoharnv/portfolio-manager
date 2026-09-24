@@ -5,8 +5,16 @@ import { createStrategyCredsSync } from './strategy-creds.js';
 
 const NAME = 'pm-strategy-read-creds';
 
-const DHAN = { clientId: '1100112233', accessToken: 'dhan-jwt', expiresAt: '2026-01-14T03:30:00.000Z' };
-const KITE = { apiKey: 'kite-key', accessToken: 'kite-token', expiresAt: '2026-01-14T00:30:00.000Z' };
+const DHAN = {
+  clientId: '1100112233',
+  accessToken: 'dhan-jwt',
+  expiresAt: '2026-01-14T03:30:00.000Z',
+};
+const KITE = {
+  apiKey: 'kite-key',
+  accessToken: 'kite-token',
+  expiresAt: '2026-01-14T00:30:00.000Z',
+};
 
 function stored(secrets: FakeSecretStore): unknown {
   const value = secrets.docs.get(NAME)?.value;
@@ -14,7 +22,7 @@ function stored(secrets: FakeSecretStore): unknown {
 }
 
 describe('createStrategyCredsSync.update', () => {
-  it('writes the login as BrokerCreds with the active broker and the token expiry', async () => {
+  it('writes the login as BrokerCreds with the active broker, bare (no envelope expiry)', async () => {
     const secrets = new FakeSecretStore();
     const sync = createStrategyCredsSync({ secrets, secretName: NAME });
 
@@ -22,7 +30,7 @@ describe('createStrategyCredsSync.update', () => {
       'written',
     );
     expect(stored(secrets)).toEqual({ broker: 'dhan', dhan: DHAN });
-    expect(secrets.docs.get(NAME)?.expiresAt).toBe(DHAN.expiresAt);
+    expect(secrets.docs.get(NAME)?.expiresAt).toBeUndefined();
   });
 
   it('keeps the other broker credentials and follows the active broker, not the login', async () => {
@@ -34,7 +42,6 @@ describe('createStrategyCredsSync.update', () => {
     await sync.update({ broker: 'kite', activeBroker: 'dhan', kite: KITE });
 
     expect(stored(secrets)).toEqual({ broker: 'dhan', dhan: DHAN, kite: KITE });
-    expect(secrets.docs.get(NAME)?.expiresAt).toBe(KITE.expiresAt);
   });
 
   it('falls back to the login broker when no active broker is configured yet', async () => {
@@ -95,7 +102,6 @@ describe('createStrategyCredsSync.setActive', () => {
     const sync = createStrategyCredsSync({ secrets, secretName: NAME });
     await expect(sync.setActive('kite')).resolves.toBe('written');
     expect(stored(secrets)).toEqual({ broker: 'kite', dhan: DHAN, kite: KITE });
-    expect(secrets.docs.get(NAME)?.expiresAt).toBe(KITE.expiresAt);
   });
 
   it('skips when the new active broker has no stored credentials', async () => {
