@@ -246,6 +246,9 @@ systemctl daemon-reload
 # ---------------------------------------------------------------------------
 systemctl enable --now nftables.service
 systemctl enable --now pm-egress-allowlist.timer
+# Re-apply the ruleset (idempotent add/delete/add) so a changed conf takes
+# effect on this deploy; it empties the sets, which the restart below refills.
+nft -f /etc/nftables-strategy-egress.conf
 # `restart`, not `start`: the unit is oneshot + RemainAfterExit, so it counts as
 # active after its first run and `start` would be a no-op — the refreshed
 # script/pins would only take effect at the timer's next firing.

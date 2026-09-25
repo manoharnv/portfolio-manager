@@ -432,6 +432,11 @@ The instrument masters no longer need a CDN host at all: the backend caches them
 under `/var/lib/pm/instruments` and the engine reads them from there
 (`PM_INSTRUMENTS_DIR`).
 
+The chain matches the `pm-strategy` user *positively* and accepts established
+connections: packets without a socket (the kernel's own RSTs) are not the engine's,
+and a connection the engine was allowed to open must survive the next refresh — the
+control is on opening connections, which is what an exfiltration attempt needs.
+
 ## 4. Incident playbook (docs/07 §7.8)
 
 In order. Don't skip steps to save time — the order is chosen so each step
