@@ -246,7 +246,10 @@ systemctl daemon-reload
 # ---------------------------------------------------------------------------
 systemctl enable --now nftables.service
 systemctl enable --now pm-egress-allowlist.timer
-systemctl start pm-egress-allowlist.service # populate the sets now, don't wait for OnBootSec
+# `restart`, not `start`: the unit is oneshot + RemainAfterExit, so it counts as
+# active after its first run and `start` would be a no-op — the refreshed
+# script/pins would only take effect at the timer's next firing.
+systemctl restart pm-egress-allowlist.service # populate the sets + pins now
 # Caddy is RESTARTED, not `enable --now`ed: the Debian package auto-starts
 # caddy.service at install/boot BEFORE steps 7–8 exist, and a no-op start left
 # it running without PM_DOMAIN — site address "" ⇒ ":80 only, no automatic
