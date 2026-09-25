@@ -111,8 +111,25 @@ export function mapTransportError(err: unknown): BrokerError {
   if (name === 'AbortError' || name === 'TimeoutError') {
     return new BrokerError('NETWORK', 'Kite request timed out or was aborted', err);
   }
+  return new BrokerError(
+    'NETWORK',
+    `Kite network request failed: ${describeTransportError(err)}`,
+    err,
+  );
+}
+
+/** `fetch failed` plus the `cause` it hides (ECONNREFUSED, ENETUNREACH, EAI_AGAIN, …). */
+export function describeTransportError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
-  return new BrokerError('NETWORK', `Kite network request failed: ${message}`, err);
+  const cause =
+    err !== null && typeof err === 'object' ? (err as { cause?: unknown }).cause : undefined;
+  if (cause === null || typeof cause !== 'object') return message;
+  const { code, message: causeMessage } = cause as { code?: unknown; message?: unknown };
+  const parts = [
+    typeof code === 'string' ? code : undefined,
+    typeof causeMessage === 'string' && causeMessage !== message ? causeMessage : undefined,
+  ].filter((p): p is string => p !== undefined);
+  return parts.length === 0 ? message : `${message} (${parts.join(': ')})`;
 }
 
 /** Which local, pre-flight order check failed. */

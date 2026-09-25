@@ -30,6 +30,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-# No ReadWritePaths: egress-allowlist.sh only talks to the kernel via nft's
-# netlink socket (not a filesystem write) and writes its scratch nft script
-# under PrivateTmp's isolated /tmp.
+# /etc is the ONE writable path: the script pins the allowlisted hostnames in
+# /etc/hosts (written next to it and renamed into place) so the engine's
+# lookups land on addresses the sets contain. nft itself is a netlink socket,
+# and the scratch nft script lives under PrivateTmp's isolated /tmp.
+ReadWritePaths=/etc

@@ -390,7 +390,6 @@ exactly these hosts —
 | Host | Why |
 |---|---|
 | `api.dhan.co` | Dhan REST API (reads AND order endpoints — see below) |
-| `images.dhan.co` | Dhan scrip-master CSV |
 | `api.kite.trade` | Kite REST API + `/instruments` CSV (reads AND order endpoints) |
 | `firestore.googleapis.com` | proposals/auditLog writes, config/strategy-def reads |
 | `secretmanager.googleapis.com` | fetching `pm-strategy-read-creds` |
@@ -420,6 +419,18 @@ outage, never an open door) — see the comment block at the top of
 `egress-allowlist.sh`.
 
 ---
+
+### Why hostnames are also pinned in `/etc/hosts`
+
+`api.dhan.co` and the Google APIs answer DNS from rotating CDN/anycast pools, so an
+IP set filled from one lookup only matches a later lookup by luck; every miss was a
+dropped connection and a strategy tick failing closed with `fetch failed`. Each
+refresh therefore resolves through `host` (DNS only) and rewrites a managed block
+in `/etc/hosts` pinning every allowlisted hostname to one of the addresses it just
+put in the sets. Both units resolve through glibc, so they agree by construction.
+The instrument masters no longer need a CDN host at all: the backend caches them
+under `/var/lib/pm/instruments` and the engine reads them from there
+(`PM_INSTRUMENTS_DIR`).
 
 ## 4. Incident playbook (docs/07 §7.8)
 

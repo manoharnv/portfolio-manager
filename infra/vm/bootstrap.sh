@@ -57,6 +57,7 @@ log "config: repo=${REPO_URL}#${REPO_REF} domain=${PM_DOMAIN} project=${GCP_PROJ
 # ---------------------------------------------------------------------------
 apt-get update -y
 apt-get install -y --no-install-recommends \
+	bind9-host \
 	ca-certificates curl gnupg git nftables debian-keyring \
 	debian-archive-keyring apt-transport-https
 

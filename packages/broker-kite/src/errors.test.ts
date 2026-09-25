@@ -139,6 +139,16 @@ describe('mapTransportError', () => {
     expect(mapTransportError(timeout).kind).toBe('NETWORK');
   });
 
+  it('surfaces the cause fetch hides behind "fetch failed"', () => {
+    const cause = Object.assign(new Error('getaddrinfo EAI_AGAIN api.kite.trade'), {
+      code: 'EAI_AGAIN',
+    });
+    const err = mapTransportError(new TypeError('fetch failed', { cause }));
+    expect(err.message).toBe(
+      'Kite network request failed: fetch failed (EAI_AGAIN: getaddrinfo EAI_AGAIN api.kite.trade)',
+    );
+  });
+
   it('maps a generic Error to NETWORK, keeping the message', () => {
     const err = mapTransportError(new TypeError('fetch failed'));
     expect(err.kind).toBe('NETWORK');

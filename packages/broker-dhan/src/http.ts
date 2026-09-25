@@ -57,8 +57,26 @@ export function toNetworkError(err: unknown, timeoutMs: number): BrokerError {
   if (aborted) {
     return new BrokerError('NETWORK', `Dhan request timed out after ${timeoutMs}ms`, err);
   }
+  return new BrokerError('NETWORK', `Dhan request failed: ${describeTransportError(err)}`, err);
+}
+
+/**
+ * `fetch` reports every socket-level failure as a bare "fetch failed" and
+ * hides the useful part (ECONNREFUSED, ENETUNREACH, EAI_AGAIN, …) in
+ * `cause` — which is exactly what an egress-allowlist or DNS problem looks
+ * like from the strategy engine's sandbox. Surface it.
+ */
+export function describeTransportError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
-  return new BrokerError('NETWORK', `Dhan request failed: ${message}`, err);
+  const cause =
+    err !== null && typeof err === 'object' ? (err as { cause?: unknown }).cause : undefined;
+  if (cause === null || typeof cause !== 'object') return message;
+  const { code, message: causeMessage } = cause as { code?: unknown; message?: unknown };
+  const parts = [
+    typeof code === 'string' ? code : undefined,
+    typeof causeMessage === 'string' && causeMessage !== message ? causeMessage : undefined,
+  ].filter((p): p is string => p !== undefined);
+  return parts.length === 0 ? message : `${message} (${parts.join(': ')})`;
 }
 
 /** Default {@link HttpClient} over global `fetch` with an AbortController timeout. */

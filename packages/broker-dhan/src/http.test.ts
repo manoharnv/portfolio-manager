@@ -133,6 +133,16 @@ describe('createFetchHttpClient', () => {
 });
 
 describe('toNetworkError', () => {
+  it('surfaces the cause fetch hides behind "fetch failed"', () => {
+    const cause = Object.assign(new Error('connect ENETUNREACH 108.158.46.69:443'), {
+      code: 'ENETUNREACH',
+    });
+    const err = toNetworkError(new TypeError('fetch failed', { cause }), 1000);
+    expect(err.message).toBe(
+      'Dhan request failed: fetch failed (ENETUNREACH: connect ENETUNREACH 108.158.46.69:443)',
+    );
+  });
+
   it('stringifies a non-Error rejection', () => {
     const err = toNetworkError('socket hang up', 1000);
     expect(err.kind).toBe('NETWORK');
