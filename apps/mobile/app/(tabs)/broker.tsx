@@ -20,7 +20,7 @@ import { mergeBrokerViews } from '../../src/hooks/useBrokerSessions';
 import { backend } from '../../src/lib/backend';
 import { describeReason, isFailure } from '../../src/lib/api';
 import { runBrokerLogin } from '../../src/lib/brokerLogin';
-import { istDateTime, istTime } from '../../src/lib/format';
+import { istDateTime } from '../../src/lib/format';
 import { colors, font, radius, space } from '../../src/theme';
 
 interface ScreenMessage {
@@ -47,7 +47,7 @@ export default function BrokerScreen() {
         setMessage({
           tone: 'ok',
           title: `${broker} connected`,
-          body: `Session valid until ${istTime(result.expiresAt)}.`,
+          body: `Session valid until ${istDateTime(result.expiresAt)}.`,
         });
         await app.refreshSession();
         return;
@@ -156,7 +156,7 @@ export default function BrokerScreen() {
             v={
               view.expiresAt === null || view.expiresAt === undefined
                 ? '—'
-                : istTime(view.expiresAt)
+                : istDateTime(view.expiresAt)
             }
           />
           <Row
