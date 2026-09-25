@@ -1,0 +1,18 @@
+# infra/vm/pm-egress-allowlist.timer — refresh the strategy egress allowlist
+# every 10 minutes (task brief: "install it as a systemd timer every 10
+# min"), because the allowlisted hostnames are DNS-resolved and their IPs
+# can change. Installed to /etc/systemd/system/pm-egress-allowlist.timer by
+# bootstrap.sh.
+
+[Unit]
+Description=Periodic refresh of the pm-strategy nftables egress allowlist
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Unit=pm-egress-allowlist.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

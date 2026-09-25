@@ -77,24 +77,57 @@ endpoints, and it sits behind the whitelisted static IP.
 
 ## Running cost (steady state)
 
+Always-on VM (a trading-window schedule exists as an opt-in but saves only ~₹230/month
+because the reserved static IP costs more while unattached — see
+[docs/08 §8.9](docs/08-infrastructure.md)).
+
 | Item | Cost |
 |---|---|
-| e2-micro VM (asia-south1) | ~$7–8/month |
-| Reserved static IP | free while attached to a running VM |
-| Firestore / Auth / FCM / Secret Manager | ~free at single-user volume |
+| e2-micro VM (asia-south1), 24/7 | ~$7.3/month |
+| 30 GB boot disk | ~$1.4/month |
+| Reserved static IP, in use | ~$3.7/month |
+| Snapshots, Secret Manager, Functions, Firestore/Auth/FCM/Monitoring | ~$0.7/month (mostly free tiers) |
+| **GCP total** | **≈ $13 ≈ ₹1,100/month (≈ ₹1,300 incl. GST)** |
 | Dhan order API | free |
 | Dhan market-data API | free if 25+ trades/30d, else ₹499/month |
-| **Total** | **~₹600–₹1,300/month** (near-zero if active trader) |
+| Domain for the backend hostname | ~₹100/month amortised |
 
 ---
 
 ## Status
 
-📄 **Design phase.** No code yet. This directory currently contains the
-specification only. Implementation is phased in [docs/09-roadmap.md](docs/09-roadmap.md);
-Phase 0 (infra bootstrap) is the first buildable step.
+🧱 **All modules implemented and unit-tested; nothing has touched a live broker or a
+real GCP project yet.** The next step is Phase 0/1 of [docs/09-roadmap.md](docs/09-roadmap.md):
+bootstrap the project from [infra/README.md](infra/README.md), then work through the
+[VERIFY-LIVE checklist](docs/11-verify-live.md) — the wire-level assumptions each module
+made against documented (not live) API shapes.
+
+| Package | What it is | Tests |
+|---|---|---|
+| `packages/core` | pure spine: domain types, zod schemas, broker interfaces (read/write split), guardrails + code ceilings, proposal state machine, books / ledger / coordinator / risk manager | 408 |
+| `packages/broker-dhan` | DhanHQ v2 adapter behind an injectable HTTP client | 198 |
+| `packages/broker-kite` | Kite Connect v3 adapter | 192 |
+| `apps/backend` | the static-IP execution service (Fastify): the only process that can place an order | 418 |
+| `apps/strategy` | proposals-only strategy engine, six deterministic strategies across long-term / swing / day-trade; order capability banned by lint + a policy test | 252 |
+| `apps/mobile` | Expo / React Native review-and-approve app | 426 |
+| `functions/` | Cloud Functions: pushes, proposal expiry, reminders; plus `firestore.rules` / indexes | 60 |
+| `infra/` | Terraform (validated), VM bootstrap, systemd, Caddy, strategy egress firewall, deploy scripts, CI | — |
+
+Every package enforces coverage thresholds (core ≥90% lines; apps ≥85%; mobile ≥80%)
+and **no unit test touches a network, a broker, Firestore or a wall clock**.
+
+### Developer quick start
+
+```bash
+pnpm install
+pnpm typecheck && pnpm test && pnpm lint && pnpm build
+```
+
+Conventions (binding for contributors and agents): [docs/00-dev-conventions.md](docs/00-dev-conventions.md).
+Per-package details: each package's `README.md` / `src/index.ts` header.
 
 ## Open decisions
 
 Tracked at the bottom of [docs/09-roadmap.md](docs/09-roadmap.md#open-questions) —
-please skim these; a few need your call before Phase 1.
+the scalping model is decided (deferred → fast intraday momentum, human-approved);
+the rest are defaults you can change before go-live.

@@ -116,6 +116,12 @@ Cron on the VM (systemd timers or a small scheduler). Typical cadence:
 All ticks are **no-ops** when `tradingEnabled=false`, `killSwitch=true`, or no broker
 session — the engine never queues proposals you can't act on.
 
+> **Implementation note:** price-taking strategies (DCA, rebalance, entries) actually
+> run on **intraday** ticks. A proposal drafted at 09:00 or 15:45 IST can never pass the
+> `marketHours` guardrail and would expire unusable; the pre-open tick is for reviews and
+> reminders, the eod tick for square-off records and next-day planning. `StrategyDef.ticks`
+> lets an operator override per strategy. See [11](11-verify-live.md) §11.4.
+
 ## 5.6 Example strategies (v1 candidates)
 
 | Strategy | Trigger | Proposal |

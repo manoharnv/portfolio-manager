@@ -1,0 +1,132 @@
+name: Deploy
+
+# Manual, gated deploy — docs/08 §8.6. Two independent jobs: the VM
+# (backend + strategy, over SSH/IAP) and Firebase (rules/indexes/functions).
+# Either can be re-run independently if only one side needs a redeploy.
+#
+# ---------------------------------------------------------------------------
+# Required GitHub configuration (names only — no values, no secrets, live in
+# this repo):
+#
+#   Environment "production" (Settings > Environments > New environment):
+#     create it and add required reviewers there — THIS FILE cannot create
+#     that approval gate by itself, `environment: production` below only
+#     references it. Until the environment exists, this workflow still runs
+#     but with no manual-approval gate.
+#
+#   Environment (or repository) VARIABLES — not secrets: Workload Identity
+#   Federation means none of these values are secret, they just name
+#   resources.
+#     GCP_WORKLOAD_IDENTITY_PROVIDER  full WIF provider resource name, e.g.
+#                                      projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
+#     GCP_DEPLOY_SERVICE_ACCOUNT      email of a dedicated CI deploy SA —
+#                                      NOT pm-backend or pm-strategy
+#                                      (infra/terraform/iam.tf). Deliberately
+#                                      out of Terraform's two-SA model: this
+#                                      identity only needs
+#                                      roles/iap.tunnelResourceAccessor +
+#                                      compute.osLogin (VM job) and
+#                                      roles/firebase.admin (Firebase job) —
+#                                      it never touches Secret Manager or
+#                                      Firestore data. See infra/README.md
+#                                      Phase 0 for the exact gcloud commands
+#                                      that create it and set up WIF.
+#     GCP_PROJECT_ID                  the dedicated GCP project id
+#     GCP_VM_NAME                     defaults to "pm-backend-vm" (Terraform
+#                                      output `vm_name`)
+#     GCP_VM_ZONE                     defaults to "asia-south1-a"
+#
+#   No GitHub Secrets are required for this workflow — that is the point of
+#   Workload Identity Federation (google-github-actions/auth) over a
+#   downloaded service-account key (docs/00 §0.7: no secrets in this repo,
+#   and a long-lived key in GitHub Secrets is exactly the kind of standing
+#   credential this design avoids).
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref (branch, tag, or commit SHA) to deploy'
+        required: true
+        default: main
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-vm:
+    name: Deploy backend + strategy (VM, via IAP)
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write # required by google-github-actions/auth for WIF
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy over IAP tunnel
+        run: |
+          gcloud compute ssh "${{ vars.GCP_VM_NAME || 'pm-backend-vm' }}" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --zone "${{ vars.GCP_VM_ZONE || 'asia-south1-a' }}" \
+            --tunnel-through-iap \
+            --command "sudo bash /opt/pm/infra/scripts/deploy.sh '${{ inputs.ref }}'"
+
+  deploy-firebase:
+    name: Deploy Firestore rules/indexes + Functions
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install firebase-tools
+        run: npm install --global firebase-tools
+
+      - name: firebase deploy + TTL policies
+        run: bash infra/scripts/firebase-deploy.sh "${{ vars.GCP_PROJECT_ID }}"

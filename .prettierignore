@@ -1,0 +1,10 @@
+# The specification is hand-formatted (mermaid diagrams, aligned tables).
+# Never let a formatter rewrite it.
+docs/
+README.md
+
+node_modules/
+dist/
+coverage/
+.turbo/
+pnpm-lock.yaml

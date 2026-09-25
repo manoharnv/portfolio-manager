@@ -1,0 +1,38 @@
+{
+  "name": "@pm/broker-kite",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Zerodha Kite Connect v3 BrokerAdapter implementation. HTTP via an injectable client; no network in tests.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "lint": "eslint src",
+    "clean": "rm -rf dist .turbo coverage"
+  },
+  "dependencies": {
+    "@pm/core": "workspace:*",
+    "zod": "^4.6.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^5.0.0",
+    "eslint": "^10.10.0",
+    "typescript": "5.9.3",
+    "vitest": "^5.0.0"
+  }
+}

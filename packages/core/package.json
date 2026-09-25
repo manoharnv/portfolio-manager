@@ -1,0 +1,36 @@
+{
+  "name": "@pm/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared domain types, zod schemas, broker interfaces, guardrails and portfolio logic. Pure: no I/O, no network.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "lint": "eslint src",
+    "clean": "rm -rf dist .turbo coverage"
+  },
+  "dependencies": {
+    "zod": "^4.6.2"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^5.0.0",
+    "eslint": "^10.10.0",
+    "typescript": "5.9.3",
+    "vitest": "^5.0.0"
+  }
+}

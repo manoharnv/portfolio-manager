@@ -1,0 +1,10 @@
+# NSE equity-segment full-day trading holidays, calendar year 2026 (IST YYYY-MM-DD).
+# Weekday closures only — weekend-dated holidays (Maha Shivaratri 02-15 Sun,
+# Id-Ul-Fitr 03-21 Sat, Independence Day 08-15 Sat) need no entry; 2026-11-08
+# (Sun) is Diwali Laxmi Pujan with a Muhurat session, not a weekday closure.
+# Sources: NSE circular CMTR71775, cross-checked against Zerodha and Groww
+# holiday calendars on 2026-09-14. Paste the comma list into MARKET_HOLIDAYS
+# (/etc/pm/backend.env) and PM_HOLIDAYS (/etc/pm/strategy.env). Refresh every
+# December when NSE publishes the next year's list — and on any special
+# closure circular (elections, etc.).
+2026-01-15,2026-01-26,2026-03-03,2026-03-26,2026-03-31,2026-04-03,2026-04-14,2026-05-01,2026-05-28,2026-06-26,2026-09-14,2026-10-02,2026-10-20,2026-11-10,2026-11-24,2026-12-25

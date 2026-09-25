@@ -1,0 +1,38 @@
+{
+  "name": "@pm/strategy",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Strategy engine: scheduled routines that WRITE PROPOSALS ONLY. Read-only broker access, no order credentials. See docs/05 and docs/10.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "lint": "eslint src",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "clean": "rm -rf dist .turbo coverage"
+  },
+  "dependencies": {
+    "@google-cloud/secret-manager": "^5.0.0",
+    "@pm/broker-dhan": "workspace:*",
+    "@pm/broker-kite": "workspace:*",
+    "@pm/core": "workspace:*",
+    "croner": "^9.0.0",
+    "firebase-admin": "^13.0.0",
+    "pino": "^9.0.0",
+    "zod": "^4.6.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^5.0.0",
+    "eslint": "^10.10.0",
+    "pino-pretty": "^13.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "5.9.3",
+    "vitest": "^5.0.0"
+  }
+}
