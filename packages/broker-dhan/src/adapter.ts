@@ -41,6 +41,7 @@ import {
   type SessionStatus,
 } from '@pm/core';
 import { describeSession, type DhanSession } from './auth.js';
+import { isDhanEmptyResult } from './errors.js';
 import type { HttpClient, HttpRequest } from './http.js';
 import type { DhanInstrument, DhanInstrumentMaster } from './instruments.js';
 import {
@@ -205,6 +206,7 @@ export class DhanAdapter implements BrokerAdapter {
   async getHoldings(): Promise<Holding[]> {
     const ctx = this.ctx();
     const res = await this.send(buildHoldingsRequest(ctx));
+    if (isDhanEmptyResult(res)) return []; // Dhan says "No holdings available" as an error
     const rows = parseHoldingsResponse(res, 'holdings', {
       ...(this.deps.defaultHoldingExchange === undefined
         ? {}
@@ -222,6 +224,7 @@ export class DhanAdapter implements BrokerAdapter {
   async getPositions(): Promise<Position[]> {
     const ctx = this.ctx();
     const res = await this.send(buildPositionsRequest(ctx));
+    if (isDhanEmptyResult(res)) return [];
     const rows = parsePositionsResponse(res, 'positions');
     const prices = await this.lastPrices(rows, 'positions');
     return rows.map((row) =>
@@ -552,6 +555,7 @@ export class DhanAdapter implements BrokerAdapter {
 
   async listOrders(): Promise<OrderStatus[]> {
     const res = await this.send(buildListOrdersRequest(this.ctx()));
+    if (isDhanEmptyResult(res)) return []; // an empty order book comes back as an error too
     return parseOrderListResponse(res, 'list orders');
   }
 }

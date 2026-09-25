@@ -297,6 +297,13 @@ export const DHAN_RENEW_TOKEN = {
 };
 
 // Error payloads, one per taxonomy row (docs/02 §2.10).
+/** What Dhan actually answers (HTTP 500) for an account with no holdings — live 2026-09-25. */
+export const DHAN_NO_HOLDINGS = {
+  errorType: 'Internal_Server_Error',
+  errorCode: 'DH-1111',
+  errorMessage: 'No holdings available',
+};
+
 export const DHAN_AUTH_ERROR = {
   errorType: 'Invalid_Authentication',
   errorCode: 'DH-901',

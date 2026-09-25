@@ -17,6 +17,7 @@ import {
   DHAN_HOLDINGS_NO_LTP,
   DHAN_INSTRUMENT_ERROR,
   DHAN_IP_ERROR,
+  DHAN_NO_HOLDINGS,
   DHAN_ORDER_ACK,
   DHAN_ORDER_ROW,
   DHAN_POSITIONS,
@@ -185,6 +186,29 @@ describe('endpoint contracts', () => {
       lastPrice: 2950.5,
       unrealizedPnl: 500,
     });
+  });
+
+  it('maps Dhan\'s "No holdings available" error (HTTP 500, DH-1111) to an empty portfolio', async () => {
+    const { adapter } = makeAdapter({
+      http: new FakeHttpClient(jsonResponse(500, DHAN_NO_HOLDINGS)),
+    });
+    await expect(adapter.getHoldings()).resolves.toEqual([]);
+  });
+
+  it('maps "No positions available" to an empty list but still fails on a real error', async () => {
+    const empty = makeAdapter({
+      http: new FakeHttpClient(
+        jsonResponse(500, { ...DHAN_NO_HOLDINGS, errorMessage: 'No positions available' }),
+      ),
+    });
+    await expect(empty.adapter.getPositions()).resolves.toEqual([]);
+
+    const broken = makeAdapter({
+      http: new FakeHttpClient(
+        jsonResponse(500, { errorCode: 'DH-908', errorMessage: 'Internal server error' }),
+      ),
+    });
+    await expect(broken.adapter.getPositions()).rejects.toBeInstanceOf(BrokerError);
   });
 
   it('getFunds → GET /v2/fundlimit', async () => {

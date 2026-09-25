@@ -4,6 +4,7 @@ import {
   classifyDhanError,
   dhanHttpError,
   dhanParseError,
+  isDhanEmptyResult,
   isRetryableError,
   parseDhanErrorInfo,
 } from './errors.js';
@@ -141,5 +142,44 @@ describe('dhanParseError', () => {
     expect(err.kind).toBe('UNKNOWN');
     expect(err.message).toContain('malformed response');
     expect(err.raw).toEqual({ a: 1 });
+  });
+});
+
+describe('isDhanEmptyResult', () => {
+  const res = (
+    status: number,
+    body: unknown,
+  ): { status: number; headers: Record<string, string>; bodyText: string } => ({
+    status,
+    headers: {},
+    bodyText: typeof body === 'string' ? body : JSON.stringify(body),
+  });
+
+  it('recognises the live "No holdings available" HTTP 500 (DH-1111) as empty', () => {
+    expect(
+      isDhanEmptyResult(
+        res(500, {
+          errorType: 'Internal_Server_Error',
+          errorCode: 'DH-1111',
+          errorMessage: 'No holdings available',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('recognises the wording without the code, for positions and orders too', () => {
+    expect(isDhanEmptyResult(res(400, { errorMessage: 'No positions available' }))).toBe(true);
+    expect(isDhanEmptyResult(res(404, { message: 'No orders found' }))).toBe(true);
+  });
+
+  it('never treats a success or a genuine error as empty', () => {
+    expect(isDhanEmptyResult(res(200, []))).toBe(false);
+    expect(
+      isDhanEmptyResult(res(500, { errorCode: 'DH-908', errorMessage: 'Internal server error' })),
+    ).toBe(false);
+    expect(
+      isDhanEmptyResult(res(401, { errorCode: 'DH-901', errorMessage: 'invalid token' })),
+    ).toBe(false);
+    expect(isDhanEmptyResult(res(502, '<html>bad gateway</html>'))).toBe(false);
   });
 });

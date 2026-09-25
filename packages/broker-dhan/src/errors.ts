@@ -213,3 +213,24 @@ export function dhanParseError(context: string, detail: string, raw: unknown): B
 export function isRetryableError(err: unknown): boolean {
   return err instanceof BrokerError && isRetryableBrokerErrorKind(err.kind);
 }
+
+/**
+ * Dhan reports an EMPTY portfolio as an error: `GET /holdings` on an account
+ * with no demat holdings answers HTTP 500 `{errorCode:"DH-1111",
+ * errorMessage:"No holdings available"}` (observed live 2026-09-25 — docs/11
+ * §11.1 #19); positions and the order book are assumed to do the same. Those
+ * are not failures — there is simply nothing — so the adapter maps them to
+ * `[]` instead of failing the caller closed.
+ */
+export const DHAN_NO_DATA_CODE = 'DH-1111';
+
+export function isDhanEmptyResult(res: HttpResponse): boolean {
+  if (res.status >= 200 && res.status < 300) return false;
+  const info = parseDhanErrorInfo(res.bodyText);
+  const code = (info.code ?? '').toUpperCase();
+  const message = (info.message ?? '').toLowerCase();
+  return (
+    code === DHAN_NO_DATA_CODE ||
+    /\bno (holdings|positions|orders|trades|data|records?) (available|found)?\b/.test(message)
+  );
+}
